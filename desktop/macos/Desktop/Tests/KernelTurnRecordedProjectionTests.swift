@@ -449,6 +449,24 @@ final class KernelTurnRecordedProjectionTests: XCTestCase {
     )
   }
 
+  func testHarnessResetRunsOnlyOneCredentialFreeClearTransaction() async {
+    var clearCalls = 0
+
+    let result: String? = await ChatProvider.withHarnessResetOwner(
+      bundleIdentifier: "com.omi.omi-fault"
+    ) {
+      clearCalls += 1
+      return nil
+    }
+
+    XCTAssertNil(result)
+    XCTAssertEqual(
+      clearCalls,
+      1,
+      "the reset control must not follow its successful daemon clear with a second model-ready clear"
+    )
+  }
+
   func testClearOwnerSurfaceStateUsesAuthoritativeJournalControlWhenModelReadinessIsUnavailable() async throws {
     let provider = ChatProvider()
     let surface = provider.mainChatSurfaceReference()
