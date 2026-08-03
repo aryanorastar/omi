@@ -1,0 +1,71 @@
+name: Solve Issue via AI Agent
+
+on:
+  repository_dispatch:
+    types: [solve_issue]
+
+jobs:
+  solve:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Notify Telegram (Started)
+        run: |
+          curl -s -X POST https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage \
+            -d chat_id=${{ github.event.client_payload.chat_id }} \
+            -d text="⏳ GitHub Action started! Cloning repo and booting up the AI agent for issue #${{ github.event.client_payload.issue_number }}..."
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install AI Agent (Sweep / Aider)
+        run: |
+          pip install aider-chat
+          # If using Aider, you can configure it here.
+          # For a real implementation, you'd pass the Anthropic/OpenAI keys as secrets.
+
+      - name: Run AI Agent
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          # Dummy script for demonstration purposes. In reality, you'd run aider here:
+          # aider --message "Fix issue #${{ github.event.client_payload.issue_number }}"
+          echo "AI Agent is solving issue #${{ github.event.client_payload.issue_number }}"
+          
+          git config --global user.name "AI Agent"
+          git config --global user.email "agent@example.com"
+          git checkout -b fix-issue-${{ github.event.client_payload.issue_number }}
+          
+          # Dummy change
+          echo "Fix for issue #${{ github.event.client_payload.issue_number }}" >> ai_fix.txt
+          git add ai_fix.txt
+          git commit -m "fix: resolve issue #${{ github.event.client_payload.issue_number }}"
+          git push origin fix-issue-${{ github.event.client_payload.issue_number }}
+
+      - name: Create Pull Request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_URL=$(gh pr create --title "Fix Issue #${{ github.event.client_payload.issue_number }}" --body "This PR was automatically created by the AI Agent." --head fix-issue-${{ github.event.client_payload.issue_number }} --base main)
+          echo "PR_URL=$PR_URL" >> $GITHUB_ENV
+
+      - name: Notify Telegram (Success)
+        if: success()
+        run: |
+          curl -s -X POST https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage \
+            -d chat_id=${{ github.event.client_payload.chat_id }} \
+            -d text="🎉 Done! The AI Agent has opened a PR: ${{ env.PR_URL }}"
+
+      - name: Notify Telegram (Failure)
+        if: failure()
+        run: |
+          curl -s -X POST https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage \
+            -d chat_id=${{ github.event.client_payload.chat_id }} \
+            -d text="❌ Something went wrong while running the AI Agent. Check the GitHub Actions logs."
