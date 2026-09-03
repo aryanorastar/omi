@@ -91,6 +91,10 @@ def ignored_paths(repo: Path) -> set[Path]:
             ],
             capture_output=True,
             text=True,
+            # git emits path bytes verbatim; a filename that is not valid in the locale
+            # encoding would otherwise raise UnicodeDecodeError, which is not a
+            # SubprocessError and would abort the check instead of falling back.
+            errors="surrogateescape",
             timeout=60,
             check=True,
         )

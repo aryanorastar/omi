@@ -78,6 +78,12 @@ def test_source_scan_skips_gitignored_sibling_worktrees(tmp_path, monkeypatch):
     stale.parent.mkdir(parents=True)
     stale.write_text("priceId: price_stale1234567890\nproductId: prod_stale1234567\n", encoding='utf-8')
 
+    # A gitignored file inside a tracked directory is just as absent from CI as a whole
+    # ignored directory, and pruning os.walk's directory_names alone does not skip it.
+    ignored_file = tmp_path / 'service' / 'local_overrides.ts'
+    ignored_file.write_text("const id = 'price_localonly1234567890';", encoding='utf-8')
+    (tmp_path / '.gitignore').write_text('.claude/\nservice/local_overrides.ts\n', encoding='utf-8')
+
     monkeypatch.setattr(plan_catalog_compiler, 'ROOT', tmp_path)
 
     assert scan_embedded_stripe_ids(load_catalog()) == [

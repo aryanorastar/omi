@@ -122,6 +122,10 @@ def _git_ignored_paths(root: Path) -> set[Path]:
             ],
             capture_output=True,
             text=True,
+            # git emits path bytes verbatim; a filename that is not valid in the locale
+            # encoding would otherwise raise UnicodeDecodeError, which is not a
+            # SubprocessError and would abort the check instead of falling back.
+            errors='surrogateescape',
             timeout=60,
             check=True,
         )
@@ -705,6 +709,10 @@ def scan_embedded_stripe_ids(catalog: Mapping[str, Any]) -> list[str]:
         )
         for file_name in sorted(file_names):
             path = Path(directory) / file_name
+            # Pruning directory_names only covers ignored directories. A gitignored file
+            # inside a tracked directory is just as absent from CI, so skip it too.
+            if path.resolve() in ignored:
+                continue
             if not _is_scannable_source(path):
                 continue
             try:
