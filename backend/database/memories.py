@@ -480,6 +480,21 @@ def get_memories(
         if len(documents) < batch_limit:
             break
 
+    if scanned >= scan_budget and len(result) < visible_limit:
+        # The page stopped on our own ceiling, not on the end of the collection, so the
+        # short page a caller receives here is indistinguishable from end-of-data. A
+        # bounded scan cannot avoid that edge -- it can only make it visible, which is
+        # what this line is for. Reaching it means a run of hidden rows longer than the
+        # slack, i.e. the page size or the slack is wrong for this account's data.
+        logger.warning(
+            'get_memories_scan_budget_exhausted offset=%s limit=%s scanned=%s budget=%s returned=%s',
+            visible_offset,
+            visible_limit,
+            scanned,
+            scan_budget,
+            len(result),
+        )
+
     logger.info(f"get_memories {len(result)}")
     return result
 

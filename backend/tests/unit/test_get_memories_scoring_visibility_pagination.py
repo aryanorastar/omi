@@ -11,6 +11,7 @@ limit before the visibility filter. This pins it against a fake that mirrors
 Firestore offset+limit (broken) and start_after scan (fixed) semantics.
 """
 
+import logging
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
@@ -252,3 +253,36 @@ def test_slack_stays_bounded_when_every_scanned_row_is_hidden():
 
     assert page == []
     assert sum(seen[0].batches) <= 10 + memories_db._MEMORY_SCORING_VISIBLE_PAGE_SCAN_SLACK
+
+
+def test_a_page_that_dies_on_the_budget_says_so(caplog):
+    """A budget-exhausted page must be distinguishable from end-of-data in the logs.
+
+    This is the one edge a bounded scan cannot design away: when the ceiling stops the
+    scan mid-hidden-run, the caller receives a short page and cannot tell it apart from
+    having reached the end of the collection. The log line is the only signal that the
+    slack was too small for this account, so it has to fire here -- and nowhere else.
+    """
+    docs = [_FakeDoc(_memory_row(f'rejected-{i}', user_review=False)) for i in range(9000)]
+
+    with caplog.at_level(logging.WARNING, logger=memories_db.logger.name):
+        page = _call_scoring_page(docs, limit=10, offset=0)
+
+    assert page == []
+    assert 'get_memories_scan_budget_exhausted' in caplog.text
+    assert f'budget={10 + memories_db._MEMORY_SCORING_VISIBLE_PAGE_SCAN_SLACK}' in caplog.text
+
+
+def test_a_page_that_simply_ran_out_of_rows_stays_quiet(caplog):
+    """The dangerous direction: warning on every short page would make the signal useless.
+
+    A collection with fewer rows than the page asks for is ordinary end-of-data, not a
+    budget failure, and must not be reported as one.
+    """
+    docs = [_FakeDoc(_memory_row(f'visible-{i}')) for i in range(3)]
+
+    with caplog.at_level(logging.WARNING, logger=memories_db.logger.name):
+        page = _call_scoring_page(docs, limit=10, offset=0)
+
+    assert len(page) == 3, 'precondition: a genuinely short page'
+    assert 'get_memories_scan_budget_exhausted' not in caplog.text
