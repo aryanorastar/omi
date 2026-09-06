@@ -249,9 +249,9 @@ import XCTest
     let source = try RealtimeHubControllerSourceTestSupport.moduleSource()
 
     XCTAssertTrue(
-      source.contains("chosenForVoice: provider == RealtimeHubSettings.shared.provider"),
+      source.contains("chosenForVoice: RealtimeHubSettings.shared.isVoiceModelChoice(provider)"),
       "the session call site must derive voice choice from the Voice Model setting, so a "
-        + "provider reached by failover is still refused the user's key")
+        + "provider reached by failover or by `.auto` is still refused the user's key")
     XCTAssertFalse(
       source.contains("chosenForVoice: true"),
       "no RealtimeHubController call site may claim voice choice unconditionally")
@@ -267,7 +267,30 @@ import XCTest
       named: "RealtimeHubTestHarness.swift")
 
     XCTAssertTrue(
-      source.contains("chosenForVoice: provider == RealtimeHubSettings.shared.provider"),
+      source.contains("chosenForVoice: RealtimeHubSettings.shared.isVoiceModelChoice(provider)"),
       "the harness must resolve BYOK auth the way a real session does")
+  }
+
+  /// `.auto` is the default Voice Model and resolves to Gemini, so treating "the hub is
+  /// on Gemini" as "the user chose Gemini" would spend a stored Gemini key for every user
+  /// who never opened the setting — a provider picked by a benchmark, not by them. Only an
+  /// explicit selection counts; `.auto` keeps the stricter Developer-Keys-only rule.
+  @MainActor
+  func testAutoVoiceModelIsNotAVoiceChoice() {
+    let previous = RealtimeOmniSettings.shared.selectedProvider
+    defer { RealtimeOmniSettings.shared.selectedProvider = previous }
+
+    RealtimeOmniSettings.shared.selectedProvider = .auto
+    XCTAssertFalse(
+      RealtimeHubSettings.shared.isVoiceModelChoice(RealtimeHubSettings.shared.provider),
+      "`.auto` resolving to a provider is not the user choosing it")
+
+    RealtimeOmniSettings.shared.selectedProvider = .geminiFlashLive
+    XCTAssertTrue(
+      RealtimeHubSettings.shared.isVoiceModelChoice(.gemini),
+      "an explicit Voice Model selection is a choice")
+    XCTAssertFalse(
+      RealtimeHubSettings.shared.isVoiceModelChoice(.openai),
+      "choosing one provider does not unlock the other's key")
   }
 }

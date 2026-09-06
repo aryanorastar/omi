@@ -203,7 +203,7 @@ final class RealtimeHubTestHarness: NSObject, RealtimeHubSessionDelegate {
       // than production and stop it exercising the withholding half of the contract.
       let byok = APIKeyService.selectedRealtimeBYOKKey(
         for: provider.byokProvider,
-        chosenForVoice: provider == RealtimeHubSettings.shared.provider)
+        chosenForVoice: RealtimeHubSettings.shared.isVoiceModelChoice(provider))
       let auth: HubAuth
       if !wantEphemeral, let key = byok {
         auth = .byokKey(key)

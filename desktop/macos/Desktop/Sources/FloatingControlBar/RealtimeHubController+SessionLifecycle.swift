@@ -63,11 +63,11 @@ extension RealtimeHubController {
       return
     }
 
-    // `effectiveProvider` is the Voice Model pick unless a failover already replaced it,
-    // so the user's own key is offered for their choice and withheld from the alternate.
+    // Offered for a provider the user picked themselves, withheld from one reached by
+    // failover or by `.auto` resolving there — see RealtimeHubSettings.isVoiceModelChoice.
     if let key = APIKeyService.selectedRealtimeBYOKKey(
       for: provider.byokProvider,
-      chosenForVoice: provider == RealtimeHubSettings.shared.provider)
+      chosenForVoice: RealtimeHubSettings.shared.isVoiceModelChoice(provider))
     {
       let fingerprint = APIKeyService.byokFingerprint(key)
       guard
