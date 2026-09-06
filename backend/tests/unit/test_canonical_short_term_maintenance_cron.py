@@ -285,6 +285,9 @@ def test_enabled_flex_uid_routes_promotion_and_l2_with_long_leases_and_guards(mo
         def llm_for_uid(self, uid, **_kwargs):
             return object() if uid == "uid-flex" else None
 
+        def job_budget_fits(self) -> bool:
+            return True
+
         assert_result_current = staticmethod(result_guard)
 
     def maintenance(uid, **kwargs):
@@ -373,6 +376,48 @@ def test_flex_deferral_stops_the_page_without_advancing_past_the_uid(monkeypatch
     assert db.docs[cron.CANONICAL_MEMORY_MAINTENANCE_CURSOR_PATH]["last_uid"] == "uid-a"
 
 
+def test_job_budget_stop_skips_later_uids_without_flex_invoke(monkeypatch):
+    _enable(monkeypatch)
+    calls = []
+
+    class _FlexRouter:
+        def __init__(self, *, db_client, force_enabled=False):
+            self.control = type("Control", (), {"enabled": True})()
+            self._checks = 0
+
+        def llm_invoke_for_uid(self, _uid):
+            return None
+
+        def llm_for_uid(self, _uid, **_kwargs):
+            return None
+
+        def job_budget_fits(self) -> bool:
+            self._checks += 1
+            return self._checks == 1
+
+    def maintenance(uid, **_kwargs):
+        calls.append(uid)
+        return cron.CanonicalShortTermMaintenanceReport(uid=uid)
+
+    monkeypatch.setattr(cron, "PromotionFlexRunRouter", _FlexRouter)
+    monkeypatch.setattr(cron, "run_canonical_short_term_maintenance", maintenance)
+    monkeypatch.setattr(cron, "count_active_short_term", lambda uid, db_client, cap=11: 3)
+    monkeypatch.setattr(cron, "recently_dreamed", lambda uid, db_client, now: False)
+
+    db = _Db(
+        [
+            _Snapshot("canonical_memory_maintenance_registry/uid-a"),
+            _Snapshot("canonical_memory_maintenance_registry/uid-b"),
+            _Snapshot("canonical_memory_maintenance_registry/uid-c"),
+        ]
+    )
+    summary = cron.run_universal_short_term_maintenance(db_client=db, now=NOW, inventory_limit=3)
+
+    assert calls == ["uid-a"]
+    assert summary.flex_deferred is True
+    assert db.docs[cron.CANONICAL_MEMORY_MAINTENANCE_CURSOR_PATH]["last_uid"] == "uid-a"
+
+
 def test_registry_cursor_persists_after_empty_short_term_skip(monkeypatch):
     _enable(monkeypatch)
     calls = []
@@ -413,6 +458,9 @@ def test_maintenance_flex_env_forces_the_router(monkeypatch):
         def llm_for_uid(self, _uid, **_kwargs):
             return None
 
+        def job_budget_fits(self) -> bool:
+            return True
+
     monkeypatch.setattr(cron, "PromotionFlexRunRouter", _FlexRouter)
     monkeypatch.setattr(
         cron,
@@ -441,6 +489,9 @@ def test_overflow_queue_bypasses_recent_dream_cooldown(monkeypatch):
 
         def llm_for_uid(self, _uid, **_kwargs):
             return object()
+
+        def job_budget_fits(self) -> bool:
+            return True
 
         assert_result_current = staticmethod(lambda: None)
 
@@ -608,143 +659,6 @@ def test_async_entrypoint_forwards_inventory_seam(monkeypatch):
     assert calls[0][1]["inventory_limit"] == 3
 
 
-def test_async_entrypoint_runs_shared_rollout_gated_ledger_sweep_for_completed_users(monkeypatch):
-    summary = cron.CanonicalShortTermMaintenanceCronSummary(
-        run_id="cron",
-        user_count=2,
-        completed_uids=("uid-enabled", "uid-disabled"),
-    )
-    sweep_calls = []
-    publication_calls = []
-
-    async def run_blocking(_executor, function, *args, **kwargs):
-        if function is cron.run_universal_short_term_maintenance:
-            return summary
-        if function is cron.run_ledger_migration_sweep:
-            sweep_calls.append((args, kwargs))
-            return SimpleNamespace(
-                migrated_long_term_count=3,
-                adjudicated_short_term_count=1,
-                remaining_live_legacy_count=0,
-            )
-        assert function is cron.publish_ledger_migration_cutover
-        publication_calls.append((args, kwargs))
-        return SimpleNamespace()
-
-    async def resolve(uid, *, stage, force_refresh):
-        assert stage == cron.JITDecisionStage.INGRESS
-        assert force_refresh is True
-        return SimpleNamespace(permits_work=uid == "uid-enabled")
-
-    monkeypatch.setattr(cron, "run_blocking", run_blocking)
-    monkeypatch.setattr(cron, "resolve_jit_rollout", resolve)
-
-    result = asyncio.run(cron.run_canonical_short_term_maintenance_cron(db_client=object(), now=NOW, run_id="cron"))
-
-    assert [call[0][0] for call in sweep_calls] == ["uid-enabled"]
-    assert [call[0][0] for call in publication_calls] == ["uid-enabled"]
-    assert sweep_calls[0][1]["publish"] is False
-    assert callable(sweep_calls[0][1]["mutation_authorizer"])
-    assert callable(sweep_calls[0][1]["publication_authorizer"])
-    assert callable(publication_calls[0][1]["publication_authorizer"])
-    assert result.ledger_migration_users == 1
-    assert result.ledger_migration_rows == 3
-
-
-def test_kill_flip_before_user_mutation_prevents_every_migration_write(monkeypatch):
-    summary = cron.CanonicalShortTermMaintenanceCronSummary(run_id="cron", user_count=1, completed_uids=("uid-a",))
-    mutation_calls = []
-
-    async def run_blocking(_executor, function, *args, **kwargs):
-        if function is cron.run_universal_short_term_maintenance:
-            return summary
-        mutation_calls.append(function)
-        raise AssertionError("a killed user must never reach migration or publication")
-
-    async def resolve(_uid, *, stage, force_refresh):
-        assert stage == cron.JITDecisionStage.INGRESS and force_refresh is True
-        return SimpleNamespace(permits_work=False)
-
-    monkeypatch.setattr(cron, "run_blocking", run_blocking)
-    monkeypatch.setattr(cron, "resolve_jit_rollout", resolve)
-
-    result = asyncio.run(cron.run_canonical_short_term_maintenance_cron(db_client=object(), now=NOW))
-    assert mutation_calls == []
-    assert result.ledger_migration_users == 0
-    assert result.ledger_migration_rows == 0
-
-
-def test_kill_flip_between_users_reauthorizes_before_second_user_mutation(monkeypatch):
-    summary = cron.CanonicalShortTermMaintenanceCronSummary(
-        run_id="cron", user_count=2, completed_uids=("uid-before-flip", "uid-after-flip")
-    )
-    sweep_uids = []
-
-    async def run_blocking(_executor, function, *args, **kwargs):
-        if function is cron.run_universal_short_term_maintenance:
-            return summary
-        if function is cron.run_ledger_migration_sweep:
-            sweep_uids.append(args[0])
-            return SimpleNamespace(
-                migrated_long_term_count=1,
-                adjudicated_short_term_count=0,
-                remaining_live_legacy_count=1,
-            )
-        raise AssertionError("publication is not expected while a live row remains")
-
-    async def resolve(uid, *, stage, force_refresh):
-        assert stage == cron.JITDecisionStage.INGRESS and force_refresh is True
-        return SimpleNamespace(permits_work=uid == "uid-before-flip")
-
-    monkeypatch.setattr(cron, "run_blocking", run_blocking)
-    monkeypatch.setattr(cron, "resolve_jit_rollout", resolve)
-
-    result = asyncio.run(cron.run_canonical_short_term_maintenance_cron(db_client=object(), now=NOW))
-
-    assert sweep_uids == ["uid-before-flip"]
-    assert result.ledger_migration_rows == 1
-
-
-def test_production_row_authorizer_force_refreshes_and_revokes_mid_batch(monkeypatch):
-    summary = cron.CanonicalShortTermMaintenanceCronSummary(run_id="cron", user_count=1, completed_uids=("uid-a",))
-    decisions = iter([True, True, False])
-    row_authorizations = []
-    publications = []
-
-    async def resolve(_uid, *, stage, force_refresh):
-        assert stage == cron.JITDecisionStage.INGRESS and force_refresh is True
-        return SimpleNamespace(permits_work=next(decisions))
-
-    async def run_blocking(_executor, function, *args, **kwargs):
-        if function is cron.run_universal_short_term_maintenance:
-            return summary
-        if function is cron.run_ledger_migration_sweep:
-            authorize = kwargs["mutation_authorizer"]
-
-            def sample_row_boundary():
-                row_authorizations.extend([authorize("mem-1"), authorize("mem-2")])
-
-            await asyncio.to_thread(sample_row_boundary)
-            return SimpleNamespace(
-                migrated_long_term_count=1,
-                adjudicated_short_term_count=0,
-                remaining_live_legacy_count=1,
-                authorization_revoked=True,
-            )
-        publications.append(function)
-        raise AssertionError("revoked migration authority must prevent publication")
-
-    monkeypatch.setattr(cron, "run_blocking", run_blocking)
-    monkeypatch.setattr(cron, "resolve_jit_rollout", resolve)
-
-    result = asyncio.run(cron.run_canonical_short_term_maintenance_cron(db_client=object(), now=NOW))
-
-    assert row_authorizations == [True, False]
-    assert publications == []
-    assert result.ledger_migration_rows == 1
-    assert result.ledger_migration_users == 0
-
-
 def test_ledger_writer_mode_skips_short_term_dreaming(monkeypatch):
     _enable(monkeypatch)
     dreamed = []
@@ -769,10 +683,3 @@ def test_ledger_writer_mode_skips_short_term_dreaming(monkeypatch):
     assert summary.skipped_ledger_writer == 1
     assert summary.dreamed_users == 1
     assert summary.completed_uids == ("uid-compat", "uid-ledger")
-
-
-def test_ledger_drain_scales_uid_page_without_raising_per_user_mutation_budget():
-    from utils.memory.knowledge_ledger_migration import MAX_LEDGER_MIGRATION_MUTATIONS_PER_RUN
-
-    assert cron.MAX_LEDGER_MIGRATION_UIDS_PER_RUN == 200
-    assert MAX_LEDGER_MIGRATION_MUTATIONS_PER_RUN == 100

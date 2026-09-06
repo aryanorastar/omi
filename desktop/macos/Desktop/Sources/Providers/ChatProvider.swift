@@ -219,7 +219,7 @@ struct ChatSession: Identifiable, Codable, Equatable {
 // MARK: - Content Block Model
 
 /// Structured tool input for inline display
-struct ToolCallInput {
+struct ToolCallInput: Equatable {
   /// Short summary for inline display (e.g., file path, command)
   let summary: String
   /// Full JSON details for expanded view
@@ -1990,6 +1990,12 @@ class ChatProvider: ObservableObject {
       for: surface,
       ownerID: ownerID
     )
+    if surface.surfaceKind == "main_chat" {
+      log(
+        "ChatProvider: resolving main_chat session chatFirstCapability="
+          + (projection == nil ? "absent" : "present")
+          + " gateConfigured=\(chatFirstMainChatProjectionGate.isConfigured(for: ownerID))")
+    }
     let session = try await resolvedAgentClient().resolveSurfaceSession(
       surface,
       creationProfile: creationProfile,
@@ -4202,6 +4208,15 @@ class ChatProvider: ObservableObject {
 
   /// Question-card controls are only live on a completed assistant turn at
   /// the conversation tail. A later user response retires its choices.
+  /// Whether the server-owned chat-first capability is currently projected for
+  /// main chat. A question card renders its options either way; this decides
+  /// whether they are pressable or dimmed (`QuestionCardView.isCapabilityAvailable`).
+  func hasChatFirstMainChatCapability() -> Bool {
+    guard let ownerID = runtimeOwnerId else { return false }
+    return chatFirstMainChatProjectionGate.capability(
+      for: mainChatSurfaceReference(), ownerID: ownerID) != nil
+  }
+
   func isQuestionCardActionable(
     messageID: String,
     questionID: String,
@@ -4468,6 +4483,7 @@ class ChatProvider: ObservableObject {
     questionInteraction: ChatQuestionCardSelection? = nil,
     questionContinuation: ChatQuestionCardContinuation? = nil,
     onAccepted: (@MainActor () -> Void)? = nil,
+    onAcceptedWithAttemptID: (@MainActor (_ attemptID: String) -> Void)? = nil,
     onJournalFinalized: (@MainActor (_ accepted: Bool) -> Void)? = nil
   ) async -> String? {
     let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -4973,7 +4989,11 @@ class ChatProvider: ObservableObject {
     // turn. Clearing composer state keeps it out of the next draft without
     // removing the pill from this message or a later journal replay.
     pendingComposerReferences.removeAll()
-    onAccepted?()
+    Self.notifyAccepted(
+      telemetryAttempt: telemetryAttempt,
+      onAccepted: onAccepted,
+      onAcceptedWithAttemptID: onAcceptedWithAttemptID
+    )
 
     // Track onboarding user-message shape without content.
     if isOnboarding {
@@ -6068,7 +6088,11 @@ class ChatProvider: ObservableObject {
   /// was accepted into the timeline. Preflight failures leave it untouched,
   /// and typing a new draft while acceptance is pending is never overwritten.
   @discardableResult
-  func sendMainDraft(_ text: String, onAccepted: (@MainActor () -> Void)? = nil) async -> String? {
+  func sendMainDraft(
+    _ text: String,
+    onAccepted: (@MainActor () -> Void)? = nil,
+    onAcceptedWithAttemptID: (@MainActor (_ attemptID: String) -> Void)? = nil
+  ) async -> String? {
     let submittedRevision = composerDraft.revision
     return await sendMessage(
       text,
@@ -6079,6 +6103,9 @@ class ChatProvider: ObservableObject {
           self.draftText == text
         else { return }
         self.draftText = ""
+      },
+      onAcceptedWithAttemptID: { attemptID in
+        onAcceptedWithAttemptID?(attemptID)
       })
   }
 
@@ -6103,6 +6130,18 @@ class ChatProvider: ObservableObject {
     stagedImageAttachmentPresent: Bool
   ) -> Bool {
     explicitImagePresent || stagedImageAttachmentPresent
+  }
+
+  /// Runs acceptance callbacks from the same attempt object that emits the
+  /// terminal `question_answered` event. Keeping the ID lookup here prevents
+  /// an acceptance caller from accidentally substituting a second turn ID.
+  static func notifyAccepted(
+    telemetryAttempt: ChatQueryTelemetryAttempt,
+    onAccepted: (@MainActor () -> Void)?,
+    onAcceptedWithAttemptID: (@MainActor (_ attemptID: String) -> Void)?
+  ) {
+    onAccepted?()
+    onAcceptedWithAttemptID?(telemetryAttempt.context.attemptId)
   }
 
   nonisolated static func messageIds(forAttemptId attemptId: String) -> (
@@ -6387,24 +6426,41 @@ class ChatProvider: ObservableObject {
     return normalized
   }
 
-  /// Append text to a streaming message via a buffer that flushes at ~100ms intervals.
-  /// This reduces SwiftUI re-renders from once-per-token to ~10 times/second.
+  /// Append text to a streaming message via a buffer that flushes at ~35ms intervals.
+  /// This reduces SwiftUI re-renders from once-per-token to ~28 times/second,
+  /// and each of those flushes reveals a paced slice rather than the whole
+  /// backlog (`ChatStreamingReveal`), so a burst from the wire reads as flow.
   private func appendToMessage(id: String, text: String) {
     streamingBuffer.appendText(messageId: id, text: text) { [weak self] in
-      self?.flushStreamingBuffer()
+      self?.flushStreamingBuffer(paced: true)
     }
   }
 
   /// Flush accumulated text and thinking deltas to the published messages array.
-  private func flushStreamingBuffer() {
-    streamingBuffer.flush(messages: &messages) { message, text in
+  ///
+  /// `paced` is the timer's flush: it lets a bounded slice of text through and
+  /// re-arms itself while any remains. The un-paced flush is for boundaries —
+  /// a tool call, the turn settling — where everything must land at once.
+  private func flushStreamingBuffer(paced: Bool = false) {
+    let normalize: (ChatMessage, String) -> String = { message, text in
       if message.sender == .ai {
         return Self.normalizeStreamingAssistantText(text)
       }
       return text
     }
+    var remaining = false
+    if paced {
+      remaining = streamingBuffer.flushPaced(messages: &messages, normalizeText: normalize)
+    } else {
+      streamingBuffer.flush(messages: &messages, normalizeText: normalize)
+    }
     for message in messages where message.isStreaming {
       scheduleJournalUpdate(messageId: message.id, status: .streaming)
+    }
+    if remaining {
+      streamingBuffer.scheduleFlush { [weak self] in
+        self?.flushStreamingBuffer(paced: true)
+      }
     }
   }
 
@@ -7009,6 +7065,10 @@ class ChatProvider: ObservableObject {
     // the transcript the user just cleared.
     revokeActiveTurn(reason: .superseded)
     pendingComposerReferences.removeAll()
+    // The daily summary renders above the thread as chrome, so the journal
+    // clear below cannot reach it — and a summary left sitting alone in a chat
+    // the reader just emptied reads as a clear that did not work.
+    ChatDailySummaryCoordinator.shared.noteChatCleared()
 
     if isInDefaultChat {
       let runtimeChatId = mainChatRuntimeChatId(sessionId: nil)
