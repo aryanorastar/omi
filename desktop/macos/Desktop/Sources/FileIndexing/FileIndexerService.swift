@@ -159,11 +159,14 @@ actor FileIndexerService {
     log("FileIndexer: Starting background rescan")
 
     let home = FileManager.default.homeDirectoryForCurrentUser
-    let folders = scanPolicy.automaticScanRoots(
+    let scanPlan = scanPolicy.automaticScanPlan(
       homeURL: home,
       fullDiskAccessGranted: fullDiskAccessGranted)
 
-    let count = await scanFolders(folders, incremental: true)
+    let count = await scanFolders(
+      scanPlan.roots,
+      incremental: true,
+      retentionProtectedPrefixes: scanPlan.retainedPrefixes)
     log("FileIndexer: Background rescan complete, \(count) files indexed")
   }
 
@@ -175,6 +178,7 @@ actor FileIndexerService {
   func scanFolders(
     _ folders: [URL],
     incremental: Bool = false,
+    retentionProtectedPrefixes: Set<String> = [],
     shouldContinue: @escaping @Sendable () -> Bool = { !Task.isCancelled }
   ) async -> Int {
     activeScanOperations += 1
@@ -195,7 +199,7 @@ actor FileIndexerService {
     // revoked, transient I/O). Files under these were not scanned, but that is
     // a read error — not deletion — so they must be excluded from the retention
     // diff (otherwise a single unreadable folder purges its whole index subtree).
-    var failedDirectories = Set<String>()
+    var failedDirectories = retentionProtectedPrefixes
 
     if incremental {
       log("FileIndexer: Loaded \(existingIndex.count) existing paths for incremental scan")

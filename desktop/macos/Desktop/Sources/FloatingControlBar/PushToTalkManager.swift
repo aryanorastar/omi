@@ -1966,7 +1966,7 @@ class PushToTalkManager: ObservableObject {
     {
       log("PushToTalkManager: microphone permission denied — ending turn without a re-request")
       if let turnID = currentVoiceTurnID {
-        voiceTurnCoordinator.publish(.finish(turnID: turnID, reason: .permissionDenied))
+        finishMicrophonePermissionDeniedAttempt(turnID: turnID)
       }
       return
     }
@@ -1986,14 +1986,31 @@ class PushToTalkManager: ObservableObject {
           self.startAudioTranscription()
         } else {
           log("PushToTalkManager: microphone permission denied")
-          self.voiceTurnCoordinator.publish(
-            .finish(turnID: permissionTurnID, reason: .permissionDenied))
+          self.finishMicrophonePermissionDeniedAttempt(turnID: permissionTurnID)
         }
       }
       return
     }
 
     startRealtimePTTRoute(startMicrophoneCapture: true)
+  }
+
+  private func finishMicrophonePermissionDeniedAttempt(turnID: VoiceTurnID) {
+    guard voiceTurnCoordinator.activeTurnID == turnID else { return }
+    pttLifecycle.noteRelease()
+    AnalyticsManager.shared.floatingBarPTTEnded(
+      mode: currentPTTMode(),
+      committed: false,
+      transcriptLength: 0)
+    pttLifecycle.terminate(
+      disposition: .permissionDenied,
+      source: "permission_gate",
+      peak: nil,
+      rms: nil,
+      turnAudioSeconds: nil,
+      voicedAudioSeconds: nil,
+      judgeable: false)
+    voiceTurnCoordinator.publish(.finish(turnID: turnID, reason: .permissionDenied))
   }
 
   /// A connected socket is not necessarily admitted for this turn's immutable
@@ -3668,7 +3685,8 @@ extension PushToTalkManager {
       batchAudioLock.lock()
       batchAudioBuffer = Data()
       batchAudioLock.unlock()
-      startMicCapture(overrideDeviceID: preferredPTTInputOverrideDeviceID())  // route PTT input override (user mic / Bluetooth built-in fallback)
+      // Route PTT input override (user mic / Bluetooth built-in fallback).
+      startMicCapture(overrideDeviceID: preferredPTTInputOverrideDeviceID())
     }
     Task { @MainActor [weak self] in
       guard let self, self.isOmniSTT,

@@ -44,6 +44,24 @@ import XCTest
       XCTAssertEqual(snap.firstChunksEnergyBucket, .none)
     }
 
+    func testPermissionDenialClosesAttemptWithItsOwnTerminalClass() {
+      let recorder = makeRecorder()
+      begin(recorder)
+
+      let snap = recorder.terminate(
+        disposition: .permissionDenied,
+        source: "permission_gate",
+        peak: nil,
+        rms: nil,
+        turnAudioSeconds: nil,
+        voicedAudioSeconds: nil,
+        judgeable: false)
+
+      XCTAssertEqual(snap.failureClass, .permissionDenied)
+      XCTAssertEqual(snap.turnDisposition, .permissionDenied)
+      XCTAssertEqual(snap.captureStartOutcome, .notRequested)
+    }
+
     // MARK: - Failure classification 2: zero / near-zero samples
 
     func testOperationalCaptureWithOnlyZeroSamplesClassifiesZeroSamples() {

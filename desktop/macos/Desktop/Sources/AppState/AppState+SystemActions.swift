@@ -446,6 +446,9 @@ extension AppState {
   /// Trigger system audio permission by actually testing capture
   /// This verifies system audio works by briefly starting and stopping capture
   func triggerSystemAudioPermission() {
+    // This call only comes from an explicit Grant action. It supersedes a
+    // prior onboarding skip before testing the process tap.
+    UserDefaults.standard.set(false, forKey: .onboardingSystemAudioSkipped)
     guard #available(macOS 14.4, *) else {
       log("System audio not supported on this macOS version")
       recordSystemAudioCaptureOutcome(.unsupported)
