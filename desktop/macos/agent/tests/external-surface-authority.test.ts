@@ -1672,6 +1672,122 @@ describe("external realtime surface authority", () => {
     fixture.store.close();
   });
 
+  it("reports a conflicting failed canonical answer as unmaterialized", () => {
+    // A failed canonical row is not ownership, it is a conflict: the successful answer
+    // is nowhere in history and this path will not overwrite a failure to put it there.
+    // Reporting materialized here told Swift the answer had landed when it had not --
+    // the silent loss this whole change exists to close.
+    const fixture = createFixture();
+    const run = fixture.kernel.beginExternalSurfaceRun(beginInput(fixture.sessionId));
+    const conversationId = String(fixture.store.getRow(
+      "SELECT conversation_id FROM surface_conversations WHERE agent_session_id = ? LIMIT 1",
+      [fixture.sessionId],
+    ).conversation_id);
+    const continuityKey = "voice:voice-turn-1";
+    recordJournalTurn(fixture.store, {
+      ownerId: "owner",
+      conversationId,
+      turnId: stableAgentSpawnTurnId(continuityKey, "assistant"),
+      role: "assistant",
+      surfaceKind: "realtime_voice",
+      origin: "agent_runtime",
+      status: "failed",
+      content: "",
+      contentBlocks: [],
+      resources: [],
+      metadataJson: JSON.stringify({ continuityKey }),
+    });
+
+    const completion = fixture.kernel.completeExternalSurfaceRun({
+      ownerId: "owner",
+      sessionId: fixture.sessionId,
+      runId: run.runId,
+      attemptId: run.attemptId,
+      terminalStatus: "completed",
+      finalText: "The answer that must not be reported as landed.",
+    });
+
+    expect(completion.journalMaterialized).toBe(false);
+    expect(completion.journalChanges).toHaveLength(0);
+    fixture.store.close();
+  });
+
+  it("restores a missing user turn when repairing an in-progress assistant row", () => {
+    // A crash between the two journal writes leaves the assistant row without its
+    // question. Repairing only the answer left an exchange that reads as an assistant
+    // talking to nobody.
+    const fixture = createFixture();
+    const run = fixture.kernel.beginExternalSurfaceRun(beginInput(fixture.sessionId));
+    const conversationId = String(fixture.store.getRow(
+      "SELECT conversation_id FROM surface_conversations WHERE agent_session_id = ? LIMIT 1",
+      [fixture.sessionId],
+    ).conversation_id);
+    const continuityKey = "voice:voice-turn-1";
+    recordJournalTurn(fixture.store, {
+      ownerId: "owner",
+      conversationId,
+      turnId: stableAgentSpawnTurnId(continuityKey, "assistant"),
+      role: "assistant",
+      surfaceKind: "realtime_voice",
+      origin: "agent_runtime",
+      status: "streaming",
+      content: "",
+      contentBlocks: [],
+      resources: [],
+      metadataJson: JSON.stringify({ continuityKey }),
+    });
+
+    const completion = fixture.kernel.completeExternalSurfaceRun({
+      ownerId: "owner",
+      sessionId: fixture.sessionId,
+      runId: run.runId,
+      attemptId: run.attemptId,
+      terminalStatus: "completed",
+      finalText: "The repaired answer.",
+    });
+
+    expect(completion.journalMaterialized).toBe(true);
+    expect(fixture.store.allRows(
+      "SELECT role, content FROM conversation_turns ORDER BY created_at_ms, turn_seq",
+    )).toEqual([
+      { role: "user", content: "Remember my latest request" },
+      { role: "assistant", content: "The repaired answer." },
+    ]);
+    fixture.store.close();
+  });
+
+  it("repairs onto the realtime surface even when a main-chat alias exists", () => {
+    // Ordering main_chat first labelled the repaired voice turns main_chat and emitted
+    // the change on that surface, so the voice projection never saw its own turn.
+    const fixture = createFixture();
+    const run = fixture.kernel.beginExternalSurfaceRun(beginInput(fixture.sessionId));
+    const realtime = fixture.store.getRow(
+      "SELECT conversation_id FROM surface_conversations WHERE agent_session_id = ? LIMIT 1",
+      [fixture.sessionId],
+    );
+    fixture.store.execute(
+      `INSERT INTO surface_conversations
+         (owner_id, agent_session_id, conversation_id, surface_kind, external_ref_kind, external_ref_id, created_at_ms, last_active_at_ms)
+       VALUES (?, ?, ?, 'main_chat', 'chat', 'main-chat-alias', ?, ?)`,
+      ["owner", fixture.sessionId, String(realtime.conversation_id), Date.now(), Date.now() + 1000],
+    );
+
+    const completion = fixture.kernel.completeExternalSurfaceRun({
+      ownerId: "owner",
+      sessionId: fixture.sessionId,
+      runId: run.runId,
+      attemptId: run.attemptId,
+      terminalStatus: "completed",
+      finalText: "Answered on the surface that asked.",
+    });
+
+    expect(completion.journalMaterialized).toBe(true);
+    for (const change of completion.journalChanges ?? []) {
+      expect(["realtime_voice", "realtime"]).toContain(change.surfaceKind);
+    }
+    fixture.store.close();
+  });
+
   it("does not attribute a synthetic external authorization prompt to the user", () => {
     const fixture = createFixture();
     const run = fixture.kernel.beginExternalSurfaceRun({

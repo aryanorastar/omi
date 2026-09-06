@@ -49,10 +49,14 @@ export function materializeExternalSurfaceRunJournal(
      FROM surface_conversations
      WHERE owner_id = ? AND agent_session_id = ?
        AND surface_kind IN ('main_chat', 'floating_chat', 'realtime_voice', 'realtime')
+     -- This repair belongs to a realtime voice run, so a realtime surface wins.
+     -- Ordering main_chat first labelled the repaired voice turns main_chat
+     -- whenever the session also had a main-chat alias, and emitted the change
+     -- on that surface, so the voice projection never saw its own turn.
      ORDER BY CASE surface_kind
-       WHEN 'main_chat' THEN 0
-       WHEN 'floating_chat' THEN 1
-       WHEN 'realtime_voice' THEN 2
+       WHEN 'realtime_voice' THEN 0
+       WHEN 'realtime' THEN 1
+       WHEN 'floating_chat' THEN 2
        ELSE 3
      END, last_active_at_ms DESC
      LIMIT 1`,
@@ -76,8 +80,16 @@ export function materializeExternalSurfaceRunJournal(
     // A spawn receipt can own this continuity key with different assistant
     // prose and run provenance. Stable canonical ownership wins over this
     // repair path; never overwrite it with provider narration.
-    if (existingAssistant.status === "completed" || existingAssistant.status === "failed") {
+    if (existingAssistant.status === "completed") {
       return { materialized: true, changes: [] };
+    }
+    // A failed canonical row is not ownership, it is a conflict: the successful
+    // answer is nowhere in history and this path will not overwrite a failure to
+    // put it there. Reporting `materialized: true` here told Swift the answer had
+    // landed when it had not, which is exactly the silent loss this change exists
+    // to close -- so report the truth and let Swift fail closed.
+    if (existingAssistant.status === "failed") {
+      return { materialized: false, changes: [] };
     }
   }
 
@@ -85,6 +97,21 @@ export function materializeExternalSurfaceRunJournal(
   if (!finalText) return { materialized: false, changes: [] };
 
   const now = input.nowMs ?? Date.now();
+  const promptIsSynthetic = external.promptIsSynthetic === true;
+  const prompt = typeof runInput.prompt === "string" ? runInput.prompt.trim() : "";
+  const metadataJson = JSON.stringify({ continuityKey });
+  const userTurn = (createdAtMs: number) => ({
+    turnId: userTurnId,
+    role: "user" as const,
+    surfaceKind,
+    origin: "realtime_voice" as const,
+    status: "completed" as const,
+    content: prompt,
+    contentBlocks: [],
+    resources: [],
+    metadataJson,
+    createdAtMs: Math.min(createdAtMs, Number.MAX_SAFE_INTEGER - 1),
+  });
   const changes: ExternalSurfaceJournalChange[] = [];
   const change = (turn: ConversationTurn): ExternalSurfaceJournalChange => ({
     ownerId: input.ownerId,
@@ -96,6 +123,20 @@ export function materializeExternalSurfaceRunJournal(
   });
 
   if (existingAssistant) {
+    // The user turn can be absent even when the assistant row exists -- a crash
+    // between the two writes leaves exactly that. Restore it first, or the
+    // repaired exchange is an answer with no question.
+    if (!existingUser && !promptIsSynthetic && prompt) {
+      // Placed just before the assistant row, not at `now`. The answer already
+      // exists and carries an older timestamp, so a restored question stamped now
+      // sorts after it and history reads as a reply with no question.
+      const restored = recordJournalExchange(store, {
+        ownerId: input.ownerId,
+        conversationId,
+        turns: [userTurn(Math.max(0, existingAssistant.createdAtMs - 1))],
+      });
+      for (const turn of restored.createdTurns) changes.push(change(turn));
+    }
     const updated = updateJournalTurn(store, {
       ownerId: input.ownerId,
       conversationId,
@@ -110,24 +151,8 @@ export function materializeExternalSurfaceRunJournal(
     return { materialized: true, changes };
   }
 
-  const promptIsSynthetic = external.promptIsSynthetic === true;
-  const prompt = typeof runInput.prompt === "string" ? runInput.prompt.trim() : "";
-  const metadataJson = JSON.stringify({ continuityKey });
   const turns = [];
-  if (!existingUser && !promptIsSynthetic && prompt) {
-    turns.push({
-      turnId: userTurnId,
-      role: "user" as const,
-      surfaceKind,
-      origin: "realtime_voice" as const,
-      status: "completed" as const,
-      content: prompt,
-      contentBlocks: [],
-      resources: [],
-      metadataJson,
-      createdAtMs: Math.min(now, Number.MAX_SAFE_INTEGER - 1),
-    });
-  }
+  if (!existingUser && !promptIsSynthetic && prompt) turns.push(userTurn(now));
   turns.push({
     turnId: assistantTurnId,
     role: "assistant" as const,

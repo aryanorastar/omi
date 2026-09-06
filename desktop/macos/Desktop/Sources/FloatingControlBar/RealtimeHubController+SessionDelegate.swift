@@ -176,7 +176,13 @@ extension RealtimeHubController {
       ownerID: capturedOwnerID,
       turnID: turnID,
       task: task,
-      answer: RealtimeExternalRunAnswerAccumulator())
+      // Seeded with what the provider has already streamed this turn. A tool can be
+      // requested mid-answer, and starting empty dropped everything said before it.
+      // The success path hides that -- `hubDidFinishTurn` replaces the whole text --
+      // but failed and cancelled turns read `snapshot` directly, so their diagnostic
+      // text was empty precisely when it mattered. The spawn and speculative
+      // slow-tool paths still clear explicitly; those clears are deliberate.
+      answer: RealtimeExternalRunAnswerAccumulator(seed: assistantText))
     return task
   }
 

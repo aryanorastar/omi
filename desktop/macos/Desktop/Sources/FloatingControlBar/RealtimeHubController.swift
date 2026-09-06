@@ -8,6 +8,17 @@ import VoiceTurnDomain
 final class RealtimeExternalRunAnswerAccumulator {
   private var text = ""
 
+  /// Seeded with whatever the provider has already streamed for this turn.
+  ///
+  /// An external tool can be requested mid-answer, and a run created with an empty
+  /// accumulator loses everything said before it. That is invisible on the success
+  /// path, where `hubDidFinishTurn` replaces the whole text -- but a failed or
+  /// cancelled turn reads `snapshot` directly, so its diagnostic text came back
+  /// empty exactly when it was most wanted.
+  init(seed: String = "") {
+    text = seed
+  }
+
   func append(_ delta: String) {
     text += delta
   }

@@ -1541,7 +1541,8 @@ actor AgentRuntimeProcess {
     message["runId"] = binding.runID
     message["attemptId"] = binding.attemptID
     message["terminalStatus"] = terminalStatus.rawValue
-    if let finalText, !finalText.isEmpty { message["finalText"] = finalText }
+    // Trimmed, not just non-empty; see ExternalSurfaceRunAnswer for why.
+    if let finalText = ExternalSurfaceRunAnswer.normalized(finalText) { message["finalText"] = finalText }
     if let errorCode, !errorCode.isEmpty { message["errorCode"] = errorCode }
     return message
   }

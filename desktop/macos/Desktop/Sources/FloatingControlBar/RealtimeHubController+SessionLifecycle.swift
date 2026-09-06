@@ -228,7 +228,10 @@ extension RealtimeHubController {
     _ completion: ExternalSurfaceRunCompletion,
     finalText: String?
   ) throws {
-    guard finalText != nil else { return }
+    // Same normalization the wire uses. Validating on `!= nil` while the wire sent
+    // only non-blank text made a whitespace-only answer demand a persistence receipt
+    // for something that was never sent.
+    guard ExternalSurfaceRunAnswer.normalized(finalText) != nil else { return }
     if !completion.duplicate && !completion.finalTextPersisted {
       throw ExternalSurfaceAuthorityError(code: "external_surface_final_text_not_persisted")
     }
