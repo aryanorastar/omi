@@ -1025,10 +1025,11 @@ final class RealtimeHubController: NSObject, RealtimeHubSessionDelegate {
     }
 
     // Order matters, and it is the reverse of what it looks like. The Gemini activity
-    // window is opened by `beginInputTurn`, which runs inside `commitTurn()` — not at
-    // `beginTurn`. So the text cannot be "sent" first: `sendSpokenCommand` deliberately
-    // buffers while the window is shut, and `beginInputTurn` flushes the buffer the moment
-    // it opens it. Waiting for the window before sending simply times out.
+    // window is opened by the session's `beginInputTurn`, which `commitTurn()` reaches
+    // through `commitClaimedHubInput` -> `beginLiveInputTurn` — not at `beginTurn`. So the
+    // text cannot be "sent" first: `sendSpokenCommand` deliberately buffers while the
+    // window is shut, and opening it flushes the buffer. Waiting for the window before
+    // sending simply times out.
     //
     // The silence frames are the other half of the same constraint: Gemini rejects a
     // pure-text activity window with a 1007 precondition failure, so the window has to
