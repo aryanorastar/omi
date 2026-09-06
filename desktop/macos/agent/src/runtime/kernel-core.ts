@@ -669,13 +669,22 @@ export class KernelCore {
     const persistedStatus = input.terminalStatus === "completed" ? "succeeded" : input.terminalStatus;
     if (TERMINAL_STATUSES.includes(run.status) || TERMINAL_STATUSES.includes(attempt.status)) {
       if (run.status === persistedStatus && attempt.status === persistedStatus) {
+        // Wrapped, like the first-completion path below. Until the missing-user-turn
+        // repair landed this branch made a single write, so atomicity was free; it now
+        // restores the question and updates the answer, and a partial failure between
+        // them would leave a half-repaired exchange until some later replay finished
+        // the job. Re-entrancy makes that recoverable rather than corrupting, but
+        // recoverable-by-retry is a weaker property than the first write already has,
+        // and there is no reason for the two paths to differ. `withTransaction` tracks
+        // nesting depth, so this composes with the transactions the journal helpers
+        // open themselves.
         const journal = run.status === "succeeded"
-          ? materializeExternalSurfaceRunJournal(this.store, {
+          ? this.withTransaction(() => materializeExternalSurfaceRunJournal(this.store, {
             ownerId: input.ownerId,
             run,
             attempt,
             finalText: run.finalText,
-          })
+          }))
           : { materialized: false, changes: [] as ExternalSurfaceJournalChange[] };
         // First write wins, so a replayed frame's text is deliberately not
         // stored. Say so rather than letting the surface read ok and assume it
