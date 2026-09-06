@@ -671,14 +671,18 @@ def test_the_webhook_runs_after_the_owner_backfill(monkeypatch):
     ), 'the webhook must run after every backfill generation, not before them'
 
 
-def test_a_dormant_owner_still_reaches_their_webhook(monkeypatch):
-    """The early return for dormant owners must not swallow the webhook.
+def test_a_dormant_day_sends_no_webhook(monkeypatch):
+    """The ``finally`` must not invent a webhook for a day that produced nothing.
 
-    ``_send_summary_notification`` returns before the backfill walk when the day
-    declined as locked or empty. Moving the webhook to a plain trailing call would
-    drop it for exactly those users — whose summary was already generated, stored
-    and pushed — which is the same loss this PR exists to stop, relocated to a
-    different exit. It fires from ``finally`` for that reason.
+    A dormant owner declines the day, so ``_send_summary_notification`` returns
+    before the backfill walk with nothing created and no payload to send. Running
+    the delivery from ``finally`` puts it on that exit path too, so the guard that
+    keeps it silent has to be pinned: a ``finally`` that fired unconditionally
+    would push an empty recap to every dormant account every night.
+
+    The other half of the claim — that the ``finally`` genuinely delivers on an
+    unusual exit — belongs to ``test_a_backfill_failure_does_not_swallow_the_webhook``,
+    which reaches it with a real payload in hand.
     """
     generated_dates, created, sent, _released, webhooks = _install_generation_fakes(monkeypatch)
     monkeypatch.setattr(notif, 'release_daily_summary_lock', lambda *_a, **_k: None)
