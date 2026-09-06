@@ -1390,6 +1390,27 @@ class NotificationService: NSObject, UNUserNotificationCenterDelegate {
         onDropped?()
         return
       }
+      // Snooze and presence are re-read here, not just at the synchronous gate
+      // above. `notificationSettings` is an async hop, and a screen share can
+      // start inside it: the gate said "nobody is watching", the callback then
+      // puts a private card on a shared screen, and that is precisely the harm
+      // this whole path exists to prevent. Owner, JIT generation and
+      // authorization were already re-checked for the same reason -- these two
+      // were the omission, and they are the ones the feature is named for.
+      // Both are pure reads of defaults plus the presence signals, so the
+      // recheck costs one more window scan on a notification that has already
+      // passed every cheaper gate.
+      if Self.shouldSuppressForSnooze(
+        respectFrequency: true,
+        snoozedUntil: Self.currentSnoozeExpiry(),
+        now: Date())
+        || Self.shouldSuppressForPresence(
+          respectFrequency: true, presence: Self.currentPresence())
+      {
+        log("NotificationService: withholding context director banner — state changed during the settings hop")
+        onDropped?()
+        return
+      }
       self.deliverNotification(
         title: title,
         message: message,
