@@ -237,4 +237,37 @@ import XCTest
       APIKeyService.selectedRealtimeBYOKKey(for: .openai),
       "the failover must not spend a key the user chose neither for text nor for voice")
   }
+
+  /// The two tests above pin `APIKeyService`'s boolean, but the boolean is only ever as
+  /// good as what the call sites pass. The decision that actually separates primary from
+  /// failover is the equality at the session call site: `effectiveProvider` is
+  /// `fallbackProvider ?? RealtimeHubSettings.shared.provider`, so comparing against the
+  /// settings value is what withholds the key from a provider reached by failover.
+  /// Widening it to a blanket `true` would spend a leftover key on the failover path and
+  /// still pass every behavioral test here, so the shape is pinned directly.
+  func testTheSessionCallSiteDerivesVoiceChoiceFromTheVoiceModelSetting() throws {
+    let source = try RealtimeHubControllerSourceTestSupport.moduleSource()
+
+    XCTAssertTrue(
+      source.contains("chosenForVoice: provider == RealtimeHubSettings.shared.provider"),
+      "the session call site must derive voice choice from the Voice Model setting, so a "
+        + "provider reached by failover is still refused the user's key")
+    XCTAssertFalse(
+      source.contains("chosenForVoice: true"),
+      "no RealtimeHubController call site may claim voice choice unconditionally")
+  }
+
+  /// The E2E harness exists to drive the real path, so it has to make the same decision.
+  /// Before this was aligned it called `selectedRealtimeBYOKKey(for:)` with no
+  /// `chosenForVoice`, which meant that for exactly the configuration this fix addresses
+  /// — Voice Model Gemini or OpenAI, text provider OpenRouter — the harness found no key
+  /// and minted an ephemeral token, testing the managed lane instead of the fix.
+  func testTheAutomationHarnessResolvesTheKeyThroughTheSameRule() throws {
+    let source = try RealtimeHubControllerSourceTestSupport.source(
+      named: "RealtimeHubTestHarness.swift")
+
+    XCTAssertTrue(
+      source.contains("chosenForVoice: provider == RealtimeHubSettings.shared.provider"),
+      "the harness must resolve BYOK auth the way a real session does")
+  }
 }

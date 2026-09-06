@@ -289,13 +289,16 @@ final class AgentErrorClassifierTests: XCTestCase {
     XCTAssertEqual(classified.code, .providerBillingExhausted)
     XCTAssertFalse(classified.retryable)
     XCTAssertTrue(
-      classified.userMessage.contains("managed"),
+      classified.userMessage.contains("This request ran on the managed lane"),
       "the copy must say which lane declined, not just \"Omi's AI service\"")
     XCTAssertTrue(
-      classified.userMessage.contains("Plan and Usage"),
+      classified.userMessage.contains("Check Settings → Plan and Usage"),
       "the managed remedy stays")
+    // Asserted as the whole remedy clause, not a bare `contains("key")`: the loose
+    // form passed on copy that merely mentioned a key without telling the user to
+    // add one, which is the half of the message this PR exists to add.
     XCTAssertTrue(
-      classified.userMessage.lowercased().contains("key"),
-      "a BYOK user needs the second remedy named too")
+      classified.userMessage.contains("add a key for the provider this path uses"),
+      "a BYOK user needs the second remedy named as an action they can take")
   }
 }

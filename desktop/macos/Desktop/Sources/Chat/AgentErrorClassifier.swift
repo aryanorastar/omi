@@ -150,9 +150,10 @@ enum AgentErrorClassifier {
         code: .providerBillingExhausted,
         userMessage:
           "Omi's managed AI service declined this request for billing reasons. "
-          + "This is the managed lane — a provider key of your own is used only for the "
-          + "providers that request supports. Check Settings → Plan and Usage, or add a key "
-          + "for the provider it needs. Resending the same message won't help.",
+          + "This request ran on the managed lane — your own provider key is used only "
+          + "when the request goes to a provider you hold a key for. Check Settings → "
+          + "Plan and Usage, or add a key for the provider this path uses. "
+          + "Resending the same message won't help.",
         retryable: false)
     }
     if lower.contains("credit balance is too low") {
