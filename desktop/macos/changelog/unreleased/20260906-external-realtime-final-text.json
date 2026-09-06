@@ -1,0 +1,3 @@
+{
+  "change": "Fixed completed realtime voice tool calls losing their final answer from conversation history"
+}

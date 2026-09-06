@@ -175,7 +175,8 @@ extension RealtimeHubController {
     externalRunAuthorityState = .init(
       ownerID: capturedOwnerID,
       turnID: turnID,
-      task: task)
+      task: task,
+      answer: RealtimeExternalRunAnswerAccumulator())
     return task
   }
 
@@ -384,6 +385,7 @@ extension RealtimeHubController {
             // pre-tool speculation keeps it out of the visible reply without
             // interrupting native provider audio or changing voices.
             self.assistantText = ""
+            self.externalRunAuthorityState?.answer.replace(with: receipt.assistantText)
             if let failedProvider = self.spawnFailureContinuationPolicy.takeFailedProvider(
               turnID: turnID.rawValue)
             {
@@ -827,6 +829,7 @@ extension RealtimeHubController {
     else { return }
     if !text.isEmpty {
       assistantText += text
+      externalRunAuthorityState?.answer.append(text)
       beginStreamingRealtimeProjectionIfNeeded()
       scheduleStreamingRealtimeProjectionFlush(continuityKey: turnIdempotencyKey)
       if let turnID = VoiceTurnCoordinator.shared.activeTurnID,
@@ -1104,6 +1107,7 @@ extension RealtimeHubController {
     let reply =
       acceptedSpawnJournalReceiptByContinuityKey[turnIdempotencyKey]?.receipt.assistantText
       ?? providerReply
+    externalRunAuthorityState?.answer.replace(with: reply)
     log(
       "RealtimeHub[\(providerTag)]: turn done — transcript_chars=\(heard.count) audio=\(audioReceivedThisTurn)"
     )

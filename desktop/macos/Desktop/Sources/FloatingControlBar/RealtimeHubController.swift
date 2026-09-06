@@ -5,6 +5,24 @@ import OmiSupport
 import VoiceTurnDomain
 
 @MainActor
+final class RealtimeExternalRunAnswerAccumulator {
+  private var text = ""
+
+  func append(_ delta: String) {
+    text += delta
+  }
+
+  func replace(with finalText: String) {
+    text = finalText
+  }
+
+  var snapshot: String? {
+    let value = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    return value.isEmpty ? nil : value
+  }
+}
+
+@MainActor
 final class RealtimeHubController: NSObject, RealtimeHubSessionDelegate {
   static let shared = RealtimeHubController()
 
@@ -187,6 +205,7 @@ final class RealtimeHubController: NSObject, RealtimeHubSessionDelegate {
     let ownerID: String
     let turnID: VoiceTurnID
     let task: Task<ExternalSurfaceRunBinding, Error>
+    let answer: RealtimeExternalRunAnswerAccumulator
   }
   struct ExternalRunTerminalizationResult: Sendable {
     let binding: ExternalSurfaceRunBinding?
@@ -202,6 +221,7 @@ final class RealtimeHubController: NSObject, RealtimeHubSessionDelegate {
     let ownerID: String
     let terminalStatus: ExternalSurfaceRunTerminalStatus
     let errorCode: String?
+    let finalText: String?
     let task: Task<ExternalRunTerminalizationResult, Never>
   }
   static let externalRunClientID = "omi-realtime-voice"
@@ -220,6 +240,7 @@ final class RealtimeHubController: NSObject, RealtimeHubSessionDelegate {
         @Sendable (
           ExternalSurfaceRunBinding,
           ExternalSurfaceRunTerminalStatus,
+          String?,
           String?,
           RuntimeOwnerTransitionCleanupCapability?
         ) async throws -> Void
@@ -516,6 +537,7 @@ final class RealtimeHubController: NSObject, RealtimeHubSessionDelegate {
           binding: binding,
           terminalStatus: tracked.terminalStatus,
           errorCode: tracked.errorCode,
+          finalText: tracked.finalText,
           cleanupCapability: cleanupCapability)
       }
       if let usedCapability = result.cleanupCapability,
@@ -573,10 +595,12 @@ final class RealtimeHubController: NSObject, RealtimeHubSessionDelegate {
     func installOwnerBoundaryExternalRunFixture(
       ownerID: String,
       turnID: VoiceTurnID,
+      finalText: String? = nil,
       onComplete:
         @escaping @Sendable (
           ExternalSurfaceRunBinding,
           ExternalSurfaceRunTerminalStatus,
+          String?,
           String?,
           RuntimeOwnerTransitionCleanupCapability?
         ) async throws -> Void
@@ -589,10 +613,13 @@ final class RealtimeHubController: NSObject, RealtimeHubSessionDelegate {
         attemptID: "owner-boundary-attempt",
         duplicate: false)
       externalRunAuthorityState?.task.cancel()
+      let answer = RealtimeExternalRunAnswerAccumulator()
+      if let finalText { answer.replace(with: finalText) }
       externalRunAuthorityState = ExternalRunAuthorityState(
         ownerID: ownerID,
         turnID: turnID,
-        task: Task { binding })
+        task: Task { binding },
+        answer: answer)
       ownerBoundaryExternalRunCompletion = onComplete
     }
 
@@ -610,7 +637,8 @@ final class RealtimeHubController: NSObject, RealtimeHubSessionDelegate {
         turnID: turnID,
         task: Task<ExternalSurfaceRunBinding, Error> {
           throw ExternalSurfaceAuthorityError(code: "owner_boundary_begin_receipt_lost")
-        })
+        },
+        answer: RealtimeExternalRunAnswerAccumulator())
       ownerBoundaryExternalRunCompletion = nil
     }
 

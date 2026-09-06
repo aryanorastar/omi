@@ -1547,6 +1547,154 @@ describe("external realtime surface authority", () => {
     fixture.store.close();
   });
 
+  it("materializes a missing completed external exchange into the canonical journal", () => {
+    const fixture = createFixture();
+    const run = fixture.kernel.beginExternalSurfaceRun(beginInput(fixture.sessionId));
+
+    const completion = fixture.kernel.completeExternalSurfaceRun({
+      ownerId: "owner",
+      sessionId: fixture.sessionId,
+      runId: run.runId,
+      attemptId: run.attemptId,
+      terminalStatus: "completed",
+      finalText: "I saved the corrected hopper ratio.",
+    });
+
+    expect(completion.journalMaterialized).toBe(true);
+    expect(completion.journalChanges).toHaveLength(2);
+    const rows = fixture.store.allRows(
+      `SELECT turn_id, role, content, status, producing_run_id, producing_attempt_id
+       FROM conversation_turns ORDER BY created_at_ms, turn_seq`,
+    );
+    const continuityKey = "voice:voice-turn-1";
+    expect(rows).toEqual([
+      {
+        turn_id: stableAgentSpawnTurnId(continuityKey, "user"),
+        role: "user",
+        content: "Remember my latest request",
+        status: "completed",
+        producing_run_id: null,
+        producing_attempt_id: null,
+      },
+      {
+        turn_id: stableAgentSpawnTurnId(continuityKey, "assistant"),
+        role: "assistant",
+        content: "I saved the corrected hopper ratio.",
+        status: "completed",
+        producing_run_id: run.runId,
+        producing_attempt_id: run.attemptId,
+      },
+    ]);
+    expect(fixture.store.getRow(
+      "SELECT COUNT(*) AS count FROM backend_turn_outbox",
+    ).count).toBe(2);
+    fixture.store.close();
+  });
+
+  it("defers to an already completed canonical voice exchange", () => {
+    const fixture = createFixture();
+    const run = fixture.kernel.beginExternalSurfaceRun(beginInput(fixture.sessionId));
+    const conversationId = String(fixture.store.getRow(
+      "SELECT conversation_id FROM surface_conversations WHERE agent_session_id = ? LIMIT 1",
+      [fixture.sessionId],
+    ).conversation_id);
+    const continuityKey = "voice:voice-turn-1";
+    recordJournalTurn(fixture.store, {
+      ownerId: "owner",
+      conversationId,
+      turnId: stableAgentSpawnTurnId(continuityKey, "assistant"),
+      role: "assistant",
+      surfaceKind: "realtime_voice",
+      origin: "agent_runtime",
+      status: "completed",
+      content: "The accepted spawn receipt owns this turn.",
+      contentBlocks: [],
+      resources: [],
+      metadataJson: JSON.stringify({ continuityKey }),
+    });
+
+    const completion = fixture.kernel.completeExternalSurfaceRun({
+      ownerId: "owner",
+      sessionId: fixture.sessionId,
+      runId: run.runId,
+      attemptId: run.attemptId,
+      terminalStatus: "completed",
+      finalText: "Provider narration must not replace the receipt.",
+    });
+
+    expect(completion.journalMaterialized).toBe(true);
+    expect(completion.journalChanges).toHaveLength(0);
+    expect(fixture.store.getRow(
+      "SELECT content FROM conversation_turns WHERE turn_id = ?",
+      [stableAgentSpawnTurnId(continuityKey, "assistant")],
+    ).content).toBe("The accepted spawn receipt owns this turn.");
+    fixture.store.close();
+  });
+
+  it("preserves a corrected canonical user transcript while repairing its missing answer", () => {
+    const fixture = createFixture();
+    const run = fixture.kernel.beginExternalSurfaceRun(beginInput(fixture.sessionId));
+    const conversationId = String(fixture.store.getRow(
+      "SELECT conversation_id FROM surface_conversations WHERE agent_session_id = ? LIMIT 1",
+      [fixture.sessionId],
+    ).conversation_id);
+    const continuityKey = "voice:voice-turn-1";
+    recordJournalTurn(fixture.store, {
+      ownerId: "owner",
+      conversationId,
+      turnId: stableAgentSpawnTurnId(continuityKey, "user"),
+      role: "user",
+      surfaceKind: "realtime_voice",
+      origin: "realtime_voice",
+      status: "completed",
+      content: "Actually, remember the corrected request.",
+      contentBlocks: [],
+      resources: [],
+      metadataJson: JSON.stringify({ continuityKey, transcriptSource: "local_lid" }),
+    });
+
+    const completion = fixture.kernel.completeExternalSurfaceRun({
+      ownerId: "owner",
+      sessionId: fixture.sessionId,
+      runId: run.runId,
+      attemptId: run.attemptId,
+      terminalStatus: "completed",
+      finalText: "I kept the corrected request.",
+    });
+
+    expect(completion.journalMaterialized).toBe(true);
+    expect(fixture.store.allRows(
+      "SELECT role, content FROM conversation_turns ORDER BY created_at_ms, turn_seq",
+    )).toEqual([
+      { role: "user", content: "Actually, remember the corrected request." },
+      { role: "assistant", content: "I kept the corrected request." },
+    ]);
+    fixture.store.close();
+  });
+
+  it("does not attribute a synthetic external authorization prompt to the user", () => {
+    const fixture = createFixture();
+    const run = fixture.kernel.beginExternalSurfaceRun({
+      ...beginInput(fixture.sessionId),
+      prompt: "Authorize the provider tool call without a final transcript",
+      promptIsSynthetic: true,
+    });
+
+    fixture.kernel.completeExternalSurfaceRun({
+      ownerId: "owner",
+      sessionId: fixture.sessionId,
+      runId: run.runId,
+      attemptId: run.attemptId,
+      terminalStatus: "completed",
+      finalText: "The tool call completed.",
+    });
+
+    expect(fixture.store.allRows(
+      "SELECT role, content FROM conversation_turns ORDER BY turn_seq",
+    )).toEqual([{ role: "assistant", content: "The tool call completed." }]);
+    fixture.store.close();
+  });
+
   it("puts the streamed text on the message.completed event, not an empty payload", () => {
     // The trace in #12731 shows these events carrying literally {"text":""}. The
     // event is emitted from finishAttemptAndRun off the same finalText the run row
@@ -1757,6 +1905,48 @@ describe("external realtime surface authority", () => {
       "SELECT final_text FROM runs WHERE run_id = ?",
       [run.runId],
     ).final_text).toBe("Three parts sand to one part clay.");
+    fixture.store.close();
+  });
+
+  it("repairs a missing journal from the first persisted answer on a completion replay", () => {
+    // A crash can commit the terminal run before the canonical journal exchange
+    // is visible. The idempotent Swift retry must repair from persisted truth,
+    // never from a different payload carried by the replayed frame.
+    const fixture = createFixture();
+    const run = fixture.kernel.beginExternalSurfaceRun(beginInput(fixture.sessionId));
+    fixture.kernel.completeExternalSurfaceRun({
+      ownerId: "owner",
+      sessionId: fixture.sessionId,
+      runId: run.runId,
+      attemptId: run.attemptId,
+      terminalStatus: "completed",
+      finalText: "The first answer is canonical.",
+    });
+    fixture.store.execute("DELETE FROM backend_turn_outbox");
+    fixture.store.execute("DELETE FROM conversation_turn_revisions");
+    fixture.store.execute("DELETE FROM conversation_turns");
+
+    const replay = fixture.kernel.completeExternalSurfaceRun({
+      ownerId: "owner",
+      sessionId: fixture.sessionId,
+      runId: run.runId,
+      attemptId: run.attemptId,
+      terminalStatus: "completed",
+      finalText: "A later replay must not replace it.",
+    });
+
+    expect(replay).toMatchObject({
+      duplicate: true,
+      finalTextPersisted: false,
+      journalMaterialized: true,
+    });
+    expect(replay.journalChanges).toHaveLength(2);
+    expect(fixture.store.allRows(
+      "SELECT role, content FROM conversation_turns ORDER BY created_at_ms, turn_seq",
+    )).toEqual([
+      { role: "user", content: "Remember my latest request" },
+      { role: "assistant", content: "The first answer is canonical." },
+    ]);
     fixture.store.close();
   });
 

@@ -25,6 +25,8 @@ struct ExternalSurfaceRunCompletion: Sendable, Equatable {
   let attemptID: String
   let terminalStatus: ExternalSurfaceRunTerminalStatus
   let duplicate: Bool
+  let finalTextPersisted: Bool
+  let journalMaterialized: Bool
 }
 
 struct ExternalSurfaceAuthorityError: LocalizedError, Sendable, Equatable {

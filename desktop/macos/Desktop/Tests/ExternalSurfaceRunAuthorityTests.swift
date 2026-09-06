@@ -56,12 +56,62 @@ final class ExternalSurfaceRunAuthorityTests: XCTestCase {
       requestId: "request-3",
       binding: binding,
       terminalStatus: .failed,
+      finalText: "Partial answer before disconnect.",
       errorCode: "provider_disconnected"
     )
 
     XCTAssertEqual(message["type"] as? String, "external_surface_run_complete")
     XCTAssertEqual(message["terminalStatus"] as? String, "failed")
+    XCTAssertEqual(message["finalText"] as? String, "Partial answer before disconnect.")
     XCTAssertEqual(message["errorCode"] as? String, "provider_disconnected")
+  }
+
+  func testCompleteWireOmitsEmptyFinalText() {
+    let message = AgentRuntimeProcess.externalSurfaceRunCompleteWireMessage(
+      clientId: "realtime",
+      requestId: "request-empty",
+      binding: binding,
+      terminalStatus: .completed,
+      finalText: "",
+      errorCode: nil
+    )
+
+    XCTAssertNil(message["finalText"])
+  }
+
+  func testCompletionValidationRejectsAContentFreeKernelReceipt() {
+    let completion = ExternalSurfaceRunCompletion(
+      runID: binding.runID,
+      attemptID: binding.attemptID,
+      terminalStatus: .completed,
+      duplicate: false,
+      finalTextPersisted: true,
+      journalMaterialized: false
+    )
+
+    XCTAssertThrowsError(
+      try RealtimeHubController.validateExternalRunCompletion(
+        completion, finalText: "A real answer")
+    ) { error in
+      XCTAssertEqual(
+        (error as? ExternalSurfaceAuthorityError)?.code,
+        "external_surface_journal_not_materialized")
+    }
+  }
+
+  func testDuplicateCompletionMayReuseTheFirstPersistedAnswer() {
+    let completion = ExternalSurfaceRunCompletion(
+      runID: binding.runID,
+      attemptID: binding.attemptID,
+      terminalStatus: .completed,
+      duplicate: true,
+      finalTextPersisted: false,
+      journalMaterialized: true
+    )
+
+    XCTAssertNoThrow(
+      try RealtimeHubController.validateExternalRunCompletion(
+        completion, finalText: "A replayed answer"))
   }
 
   func testStructuredErrorUsesCodeWithoutTrustingDisplayMessage() {
