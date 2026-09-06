@@ -710,12 +710,21 @@ class FloatingControlBarWindow: NSPanel, NSWindowDelegate {
   override var canBecomeKey: Bool { true }
   override var canBecomeMain: Bool { false }
 
+  /// Unhandled keys stop here. This panel has no window controller, so `super.keyDown` has no next
+  /// responder to pass to and answers with `noResponderFor(_:)` — the alert sound — every time the
+  /// user types while the input field is not first responder (hover menu open, response showing).
+  /// Escape and Tab are the keys the window itself acts on (Tab so Full Keyboard Access can still
+  /// step into the panel's controls, which `NSWindow.keyDown` used to do); everything else is
+  /// deliberately absorbed.
   override func keyDown(with event: NSEvent) {
-    if event.keyCode == 53 {  // Escape
+    switch event.keyCode {
+    case 53:  // Escape
       handleEscapeKey()
-      return
+    case 48:  // Tab
+      if event.modifierFlags.contains(.shift) { selectPreviousKeyView(nil) } else { selectNextKeyView(nil) }
+    default:
+      break
     }
-    super.keyDown(with: event)
   }
 
   func handleEscapeKey() {
@@ -3205,6 +3214,8 @@ class FloatingControlBarManager {
     let isAskOmiFocused: Bool
     let frame: String?
     let isVoiceListening: Bool
+    /// The current hold has been recognised as a dictation (the notch's red tint).
+    let isVoiceDictating: Bool
     let isVoiceResponseActive: Bool
     let usesNotchIsland: Bool
   }
@@ -3217,6 +3228,7 @@ class FloatingControlBarManager {
         isAskOmiFocused: false,
         frame: nil,
         isVoiceListening: false,
+        isVoiceDictating: false,
         isVoiceResponseActive: false,
         usesNotchIsland: false
       )
@@ -3228,6 +3240,7 @@ class FloatingControlBarManager {
       isAskOmiFocused: focused,
       frame: NSStringFromRect(window.frame),
       isVoiceListening: window.state.isVoiceListening,
+      isVoiceDictating: window.state.isVoiceDictating,
       isVoiceResponseActive: window.state.isVoiceResponseGlowActive,
       usesNotchIsland: window.state.usesNotchIsland
     )
@@ -3299,7 +3312,8 @@ class FloatingControlBarManager {
         ownerID: RuntimeOwnerIdentity.currentOwnerId() ?? "",
         title: "Couldn't reach Omi",
         message: message,
-        assistantId: "reach_error"
+        assistantId: "reach_error",
+        kind: .functional
       )
     )
   }
@@ -3515,6 +3529,13 @@ class FloatingControlBarManager {
     window?.makeKeyAndOrderFront(nil)
   }
 
+  /// A feedback task may outlive the card that launched it. Callers use this
+  /// main-actor check before entering the asynchronous mutation and again before
+  /// dismissal; the feedback actor remains the owner and generation authority.
+  func isCurrentNotification(_ notificationID: UUID) -> Bool {
+    window?.state.currentNotification?.id == notificationID
+  }
+
   @discardableResult
   func showNotification(
     ownerID: String,
@@ -3522,10 +3543,13 @@ class FloatingControlBarManager {
     message: String,
     assistantId: String,
     sound: NotificationSound,
-    kind: ProactiveNotificationKind? = nil,
+    /// Required: what this card *is*. There is no assistant-id fallback — see
+    /// `FloatingBarNotification.init`.
+    kind: ProactiveNotificationKind,
     context: FloatingBarNotificationContext? = nil,
     action: FloatingBarNotificationAction? = nil,
     jitFeedbackContext: JITTriggerFeedbackContext? = nil,
+    jitAmbientFeedbackContext: JITAmbientFeedbackContext? = nil,
     suggestionTelemetryIdentity: SuggestionAssistantTelemetry.NotificationIdentity? = nil,
     insightDeliveryID: UUID? = nil,
     screenshotData: Data? = nil,
@@ -3553,7 +3577,8 @@ class FloatingControlBarManager {
       context: context,
       action: action,
       jitFeedbackContext: jitFeedbackContext,
-      suggestionTelemetryIdentity: suggestionTelemetryIdentity,
+      jitAmbientFeedbackContext: jitAmbientFeedbackContext,
+      suggestionTelemetryIdentity: suggestionTelemetryIdentity ?? jitAmbientFeedbackContext?.suggestionIdentity,
       insightDeliveryID: insightDeliveryID,
       screenshotData: screenshotData,
       isPersistent: isPersistent
@@ -3862,7 +3887,7 @@ class FloatingControlBarManager {
     verb: InterjectFeedbackVerb
   ) async {
     guard InterjectFeature.isEnabled else { return }
-    await InterjectSuggestionFeedbackMutation.record(
+    _ = await InterjectSuggestionFeedbackMutation.record(
       evaluationID: identity.evaluationID,
       suggestionID: identity.suggestionID,
       verb: verb
@@ -3876,7 +3901,7 @@ class FloatingControlBarManager {
     guard let verb = parsed.verb,
       let identity = recentNotchCardFeedbackIdentity()
     else { return }
-    await InterjectSuggestionFeedbackMutation.record(
+    _ = await InterjectSuggestionFeedbackMutation.record(
       evaluationID: identity.evaluationID,
       suggestionID: identity.suggestionID,
       verb: verb
@@ -3944,8 +3969,10 @@ class FloatingControlBarManager {
           for: nextNotification, outcome: .suppressed, reason: .staleOwner)
         continue
       }
-      presentNotification(nextNotification, in: window)
-      return
+      if presentNotification(nextNotification, in: window) { return }
+      // The final presentation seam can reject a card after it has left the
+      // queue (for example, when its JIT account generation became stale).
+      // Keep draining so one rejected card cannot strand newer work.
     }
   }
   /// Detach the floating UI from any in-flight chat streaming.
@@ -4536,6 +4563,17 @@ class FloatingControlBarManager {
       Self.recordInsightDeliveryOutcome(for: notification, outcome: .suppressed, reason: .staleOwner)
       return false
     }
+    guard
+      NotificationService.jitFeedbackGenerationsMatch(
+        jitFeedbackContext: notification.jitFeedbackContext,
+        jitAmbientFeedbackContext: notification.jitAmbientFeedbackContext,
+        currentGeneration: AccountCutoverControlManager.shared.control.accountGeneration)
+    else {
+      notificationPresentationCallbacks.removeValue(forKey: notification.id)?.onDropped()
+      notificationAuthorizationSnapshots.removeValue(forKey: notification.id)
+      log("FloatingControlBarManager: refusing to present stale JIT generation")
+      return false
+    }
     persistNotificationMessageIfNeeded(notification)
     clearInterjectGrace()
 
@@ -4658,8 +4696,10 @@ class FloatingControlBarManager {
             for: nextNotification, outcome: .suppressed, reason: .staleOwner)
           continue
         }
-        presentNotification(nextNotification, in: window)
-        return
+        if presentNotification(nextNotification, in: window) { return }
+        // The final presentation seam can reject a card after it has left the
+        // queue (for example, when its JIT account generation became stale).
+        // Keep draining so one rejected card cannot strand newer work.
       }
     }
 
@@ -4682,6 +4722,10 @@ class FloatingControlBarManager {
       // read your inbox…" into the user's conversation history as though it
       // were an observation is noise they cannot act on there.
       notification.assistantId != IntegrationNudgeCoordinator.assistantID,
+      // Trial and onboarding cards are product copy — billing state and
+      // permission help — not something Omi observed. Writing them into the
+      // transcript is the same noise the integration offer above is excluded for.
+      notification.kind.isJournaled,
       // The meeting summary share card must not journal either: the durable
       // Chat surface for a finished meeting is the conversation-link card the
       // backend already materializes, and journaling here would produce a
