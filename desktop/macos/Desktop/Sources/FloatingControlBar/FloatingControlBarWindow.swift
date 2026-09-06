@@ -3221,6 +3221,8 @@ class FloatingControlBarManager {
     let isAskOmiFocused: Bool
     let frame: String?
     let isVoiceListening: Bool
+    /// The current hold has been recognised as a dictation (the notch's red tint).
+    let isVoiceDictating: Bool
     let isVoiceResponseActive: Bool
     let usesNotchIsland: Bool
   }
@@ -3233,6 +3235,7 @@ class FloatingControlBarManager {
         isAskOmiFocused: false,
         frame: nil,
         isVoiceListening: false,
+        isVoiceDictating: false,
         isVoiceResponseActive: false,
         usesNotchIsland: false
       )
@@ -3244,6 +3247,7 @@ class FloatingControlBarManager {
       isAskOmiFocused: focused,
       frame: NSStringFromRect(window.frame),
       isVoiceListening: window.state.isVoiceListening,
+      isVoiceDictating: window.state.isVoiceDictating,
       isVoiceResponseActive: window.state.isVoiceResponseGlowActive,
       usesNotchIsland: window.state.usesNotchIsland
     )
@@ -3315,7 +3319,8 @@ class FloatingControlBarManager {
         ownerID: RuntimeOwnerIdentity.currentOwnerId() ?? "",
         title: "Couldn't reach Omi",
         message: message,
-        assistantId: "reach_error"
+        assistantId: "reach_error",
+        kind: .functional
       )
     )
   }
@@ -3531,6 +3536,13 @@ class FloatingControlBarManager {
     window?.makeKeyAndOrderFront(nil)
   }
 
+  /// A feedback task may outlive the card that launched it. Callers use this
+  /// main-actor check before entering the asynchronous mutation and again before
+  /// dismissal; the feedback actor remains the owner and generation authority.
+  func isCurrentNotification(_ notificationID: UUID) -> Bool {
+    window?.state.currentNotification?.id == notificationID
+  }
+
   @discardableResult
   func showNotification(
     ownerID: String,
@@ -3538,10 +3550,13 @@ class FloatingControlBarManager {
     message: String,
     assistantId: String,
     sound: NotificationSound,
-    kind: ProactiveNotificationKind? = nil,
+    /// Required: what this card *is*. There is no assistant-id fallback — see
+    /// `FloatingBarNotification.init`.
+    kind: ProactiveNotificationKind,
     context: FloatingBarNotificationContext? = nil,
     action: FloatingBarNotificationAction? = nil,
     jitFeedbackContext: JITTriggerFeedbackContext? = nil,
+    jitAmbientFeedbackContext: JITAmbientFeedbackContext? = nil,
     suggestionTelemetryIdentity: SuggestionAssistantTelemetry.NotificationIdentity? = nil,
     insightDeliveryID: UUID? = nil,
     screenshotData: Data? = nil,
@@ -3569,7 +3584,8 @@ class FloatingControlBarManager {
       context: context,
       action: action,
       jitFeedbackContext: jitFeedbackContext,
-      suggestionTelemetryIdentity: suggestionTelemetryIdentity,
+      jitAmbientFeedbackContext: jitAmbientFeedbackContext,
+      suggestionTelemetryIdentity: suggestionTelemetryIdentity ?? jitAmbientFeedbackContext?.suggestionIdentity,
       insightDeliveryID: insightDeliveryID,
       screenshotData: screenshotData,
       isPersistent: isPersistent
@@ -3859,10 +3875,10 @@ class FloatingControlBarManager {
     storedNotification(forContinuityKey: key)?.context?.detail
   }
 
-  /// Hub journal finalization is the realtime path into the ledger. Same
-  /// mutation owner as the batch `sendVoiceOnlyQuery` path.
+  /// Hub classification writes through `record_interject_feedback`. Parsing a
+  /// leftover token here would double-fire the ledger against the silent tool.
   func consumeInterjectHubTranscript(_ text: String) async {
-    await consumeInterjectVoiceReplyAsync(text)
+    _ = text
   }
 
   func consumeInterjectVoiceReply(_ text: String) {
@@ -3878,7 +3894,7 @@ class FloatingControlBarManager {
     verb: InterjectFeedbackVerb
   ) async {
     guard InterjectFeature.isEnabled else { return }
-    await InterjectSuggestionFeedbackMutation.record(
+    _ = await InterjectSuggestionFeedbackMutation.record(
       evaluationID: identity.evaluationID,
       suggestionID: identity.suggestionID,
       verb: verb
@@ -3892,7 +3908,7 @@ class FloatingControlBarManager {
     guard let verb = parsed.verb,
       let identity = recentNotchCardFeedbackIdentity()
     else { return }
-    await InterjectSuggestionFeedbackMutation.record(
+    _ = await InterjectSuggestionFeedbackMutation.record(
       evaluationID: identity.evaluationID,
       suggestionID: identity.suggestionID,
       verb: verb
@@ -3960,8 +3976,10 @@ class FloatingControlBarManager {
           for: nextNotification, outcome: .suppressed, reason: .staleOwner)
         continue
       }
-      presentNotification(nextNotification, in: window)
-      return
+      if presentNotification(nextNotification, in: window) { return }
+      // The final presentation seam can reject a card after it has left the
+      // queue (for example, when its JIT account generation became stale).
+      // Keep draining so one rejected card cannot strand newer work.
     }
   }
   /// Detach the floating UI from any in-flight chat streaming.
@@ -4593,6 +4611,17 @@ class FloatingControlBarManager {
       Self.recordInsightDeliveryOutcome(for: notification, outcome: .suppressed, reason: .staleOwner)
       return false
     }
+    guard
+      NotificationService.jitFeedbackGenerationsMatch(
+        jitFeedbackContext: notification.jitFeedbackContext,
+        jitAmbientFeedbackContext: notification.jitAmbientFeedbackContext,
+        currentGeneration: AccountCutoverControlManager.shared.control.accountGeneration)
+    else {
+      notificationPresentationCallbacks.removeValue(forKey: notification.id)?.onDropped()
+      notificationAuthorizationSnapshots.removeValue(forKey: notification.id)
+      log("FloatingControlBarManager: refusing to present stale JIT generation")
+      return false
+    }
     persistNotificationMessageIfNeeded(notification)
     clearInterjectGrace()
 
@@ -4715,8 +4744,10 @@ class FloatingControlBarManager {
             for: nextNotification, outcome: .suppressed, reason: .staleOwner)
           continue
         }
-        presentNotification(nextNotification, in: window)
-        return
+        if presentNotification(nextNotification, in: window) { return }
+        // The final presentation seam can reject a card after it has left the
+        // queue (for example, when its JIT account generation became stale).
+        // Keep draining so one rejected card cannot strand newer work.
       }
     }
 
@@ -4739,6 +4770,10 @@ class FloatingControlBarManager {
       // read your inbox…" into the user's conversation history as though it
       // were an observation is noise they cannot act on there.
       notification.assistantId != IntegrationNudgeCoordinator.assistantID,
+      // Trial and onboarding cards are product copy — billing state and
+      // permission help — not something Omi observed. Writing them into the
+      // transcript is the same noise the integration offer above is excluded for.
+      notification.kind.isJournaled,
       // The meeting summary share card must not journal either: the durable
       // Chat surface for a finished meeting is the conversation-link card the
       // backend already materializes, and journaling here would produce a

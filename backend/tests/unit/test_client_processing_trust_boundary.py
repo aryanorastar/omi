@@ -563,6 +563,9 @@ PINNED_CONVERSATION_DUMPS: FrozenSet[DumpSite] = frozenset(
         ),
         DumpSite('utils/task_intelligence/backend_capture.py', 'policy_signals', 'model_dump'),
         DumpSite('utils/task_intelligence/conversation_capture.py', 'canonical_fields', 'model_dump'),
+        # Daily-summary stats payload (not Conversation); scanner matches any model_dump.
+        DumpSite('utils/llm/external_integrations.py', '_basic_daily_summary', 'model_dump'),
+        DumpSite('utils/llm/external_integrations.py', 'generate_comprehensive_daily_summary', 'model_dump'),
         DumpSite('routers/goals.py', 'create_goal', 'model_dump'),
         DumpSite('routers/goals.py', 'create_canonical_goal', 'model_dump'),
         DumpSite('routers/goals.py', 'update_goal', 'model_dump'),
@@ -587,6 +590,10 @@ PINNED_CONVERSATION_FIELDS: FrozenSet[str] = frozenset(
         'uses_custom_stt',
         'structured',
         'client_processing',
+        # S3 (§1.7): server-authored, NOT projection-family. It says why
+        # `structured` is the deterministic minimum; it carries no client text,
+        # so the integration redactor must not strip it.
+        'processing_state',
         'transcript_segments',
         'transcript_segments_compressed',
         'geolocation',

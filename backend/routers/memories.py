@@ -3,7 +3,9 @@ import uuid
 from typing import Any, Callable, Dict, List, Literal, Optional, cast
 
 import database._client as db_client_module
+from database.legal_holds import DestructiveOperationInProgress
 from utils.executors import db_executor, llm_executor, postprocess_executor, run_blocking, submit_with_context
+from utils.other.account_gate_http import account_gate_busy_http_exception
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
@@ -20,6 +22,7 @@ from utils.memory.memory_service import (
     MemoryService,
     fetch_memory_dict,
 )
+from utils.memory.canonical_memory_adapter import mint_direct_user_write_authority
 from utils.observability.fallback import record_fallback
 from utils.feedback import record_memory_feedback
 from testing.parity_pack_v0.live_capture import SurfaceParityCapture
@@ -374,6 +377,7 @@ async def create_memory(
             operation="create_memory",
             upsert_vector=False,
             require_canonical_promotion=True,
+            direct_user_authority=mint_direct_user_write_authority(),
         )
     except Exception:
         logger.exception("MemoryService create_memory failed uid=%s", uid)
@@ -470,6 +474,7 @@ async def create_memories_batch(
             operation="batch_create_memory",
             upsert_vectors=False,
             require_canonical_promotion=True,
+            direct_user_authority=mint_direct_user_write_authority(),
         )
     except Exception:
         logger.exception("MemoryService create_memories_batch failed uid=%s count=%s", uid, len(memory_dbs))
@@ -817,6 +822,8 @@ def delete_memories_batch(
     except HTTPException:
         # Preserve service-owned 402/404/413 mappings and observability details.
         raise
+    except DestructiveOperationInProgress as exc:
+        raise account_gate_busy_http_exception() from exc
     except ValueError:
         raise HTTPException(status_code=404, detail='Memory not found')
     return {'status': 'ok'}
@@ -831,6 +838,8 @@ def delete_memory(
 ):
     try:
         MemoryService(db_client=getattr(db_client_module, 'db', None)).delete(uid, memory_id)
+    except DestructiveOperationInProgress as exc:
+        raise account_gate_busy_http_exception() from exc
     except ValueError:
         raise HTTPException(status_code=404, detail='Memory not found')
     return {'status': 'ok'}
