@@ -171,6 +171,11 @@ final class NotchMomentsCoordinator {
   ///
   /// `respectFrequency` is left at its default of `true` because that is exactly what
   /// these are: proactive cards, subject to every control the user has.
+  ///
+  /// No `kind:` is passed: `sendNotification` derives it as
+  /// `ProactiveNotificationKind.from(assistantId:)` — the same expression the old direct
+  /// `showNotification` call spelled out — and its category-toggle gate reads that same
+  /// value, so stating it twice could only ever drift.
   private func post(title: String, message: String, assistantId: String) {
     guard let ownerID = RuntimeOwnerIdentity.currentOwnerId() else { return }
     NotificationService.shared.sendNotification(

@@ -42,6 +42,10 @@ struct ConversationsPage: View {
   @Binding var selectedConversation: ServerConversation?
   var brainDestination: MemoryHubDestination? = nil
   var onSelectBrainDestination: ((MemoryHubDestination) -> Void)? = nil
+  var initialCaptureMomentTimestamp: TimeInterval? = nil
+  var onCaptureFocusResolved: ((Bool) -> Void)? = nil
+  var onDiscussInChat: ((ServerConversation) -> Void)? = nil
+  var onOpenLinkedTask: ((String) -> Void)? = nil
   @ObservedObject private var automation = ConversationDetailAutomationState.shared
 
   /// When true, renders without internal ScrollViews (for embedding in an outer ScrollView)
@@ -126,6 +130,7 @@ struct ConversationsPage: View {
       // folder sheets) otherwise keeps rendering the previous account's rows even
       // after AppState and the repository reset.
       .onReceive(NotificationCenter.default.publisher(for: .runtimeOwnerDidChange)) { _ in
+        selectedConversation = nil
         searchQuery = ""
         searchResults = []
         isSearching = false
@@ -142,6 +147,12 @@ struct ConversationsPage: View {
         isMerging = false
         mergeError = nil
         isLiveTranscriptExpanded = false
+      }
+      .onReceive(appState.$conversations) { conversations in
+        guard let selectedConversation,
+          let refreshed = conversations.first(where: { $0.id == selectedConversation.id })
+        else { return }
+        self.selectedConversation = refreshed
       }
       .dismissableSheet(isPresented: $showCreateFolderSheet) {
         FolderFormSheet(folder: nil, onDismiss: { showCreateFolderSheet = false })
@@ -170,7 +181,8 @@ struct ConversationsPage: View {
           QuerySearchBar(
             text: $searchQuery,
             accessibilityID: "conversations-search-field",
-            placeholder: "Search conversations…"
+            placeholder: "Search conversations…",
+            searchSurface: .conversations
           )
           .onChange(of: searchQuery) { _, newValue in
             if !newValue.isEmpty { selectedConversation = nil }
@@ -208,7 +220,11 @@ struct ConversationsPage: View {
               await appState.refreshConversations()
             }
           }
-        }
+        },
+        initialCaptureMomentTimestamp: initialCaptureMomentTimestamp,
+        onCaptureFocusResolved: onCaptureFocusResolved,
+        onDiscussInChat: selected.source == .omi ? { onDiscussInChat?(selected) } : nil,
+        onOpenLinkedTask: onOpenLinkedTask
       )
     } else {
       // Main view with recording header and conversation list
@@ -311,10 +327,22 @@ struct ConversationsPage: View {
         .padding(.horizontal, OmiSpacing.xxl)
         .padding(.top, OmiSpacing.md)
         .padding(.bottom, OmiSpacing.md)
+        .transition(.opacity)
+      } else if appState.isFinalizingCapture {
+        // The Live card's slot stays occupied while the capture becomes a
+        // row, so the meeting lands in place instead of vanishing and
+        // reappearing further down.
+        ConversationsSavingCaptureCard()
+          .padding(.horizontal, OmiSpacing.xxl)
+          .padding(.top, OmiSpacing.md)
+          .padding(.bottom, OmiSpacing.md)
+          .transition(.opacity)
       }
 
       conversationListSection
     }
+    .omiAnimation(.easeInOut(duration: 0.25), value: appState.isLiveCapturing)
+    .omiAnimation(.easeInOut(duration: 0.25), value: appState.isFinalizingCapture)
 
     if embedded {
       content
@@ -424,7 +452,8 @@ struct ConversationsPage: View {
         OmiSearchField(
           placeholder: "Search conversations",
           text: $searchQuery,
-          isLoading: isSearching
+          isLoading: isSearching,
+          searchSurface: .conversations
         )
         .onChange(of: searchQuery) { _, newValue in submitSearch(newValue) }
         .padding(.horizontal, QueryShellLayout.panelPaddingHorizontal)
@@ -540,6 +569,11 @@ struct ConversationsPage: View {
           conversation: conversation,
           onTap: {
             AnalyticsManager.shared.memoryListItemClicked(conversationId: conversation.id)
+            SearchAnalytics.resultOpened(
+              surface: .conversations,
+              resultIndex: visibleSearchResults.firstIndex(where: { $0.id == conversation.id }),
+              searchIsActive: true
+            )
             selectedConversation = conversation
           },
           folders: appState.folders,
@@ -585,7 +619,6 @@ struct ConversationsPage: View {
     isSearching = true
     searchError = nil
     log("Search: Starting search for '\(query)'")
-    AnalyticsManager.shared.searchQueryEntered(query: query)
 
     Task {
       do {
@@ -593,6 +626,7 @@ struct ConversationsPage: View {
         log("Search: Found \(result.count) results")
         searchResults = result
         isSearching = false
+        SearchAnalytics.queryEntered(surface: .conversations, query: query, resultsCount: result.count)
       } catch is CancellationError {
         // A newer query owns the search UI now.
       } catch {
@@ -600,6 +634,7 @@ struct ConversationsPage: View {
         searchError = UserFacingErrorPresentation.message(for: error, while: .conversationSearch)
         searchResults = []
         isSearching = false
+        SearchAnalytics.queryEntered(surface: .conversations, query: query, resultsCount: 0)
       }
     }
   }

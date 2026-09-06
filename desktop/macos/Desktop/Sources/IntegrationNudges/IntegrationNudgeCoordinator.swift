@@ -70,6 +70,7 @@ final class IntegrationNudgeCoordinator {
       title: "Connect \(match.entry.displayName)",
       message: match.entry.pitch,
       assistantId: IntegrationNudgeCoordinator.assistantID,
+      kind: .integration,
       action: .connectIntegration(
         telemetryID: match.entry.telemetryID,
         triggerID: match.trigger.id

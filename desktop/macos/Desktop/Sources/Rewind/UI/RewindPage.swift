@@ -484,7 +484,7 @@ struct RewindPage: View {
           text: $viewModel.searchQuery,
           accessibilityID: "rewind-search-field",
           placeholder: "Search screen history…",
-          focus: $isSearchFocused
+          focus: $isSearchFocused, searchSurface: .rewind
         )
         .onChange(of: viewModel.searchQuery) { _, query in
           if query.isEmpty { searchViewMode = nil }
@@ -609,12 +609,16 @@ struct RewindPage: View {
     .help(captureStateHelp)
   }
 
+  /// The knob shows the setting (right = capture enabled); the label shows reality.
+  /// "Off" therefore only ever appears next to a left knob — when capture is enabled
+  /// but health reports it not flowing, the label names the failure instead, or the
+  /// control reads as contradicting itself (red pill, knob right, "Capture Off").
   private var captureStateLabel: String {
     switch screenCaptureHealth {
     case .active: return "Capture On"
     case .temporarilyUnavailable: return "Capture Paused"
     case .recovering: return "Capture Recovering"
-    case .stopped: return "Capture Off"
+    case .stopped: return isMonitoring ? "Capture Stopped" : "Capture Off"
     }
   }
 
@@ -1458,53 +1462,57 @@ struct RewindPage: View {
   }
 
   private var loadingView: some View {
-    VStack(spacing: OmiSpacing.md) {
-      ProgressView()
-        .progressViewStyle(.circular)
-        .scaleEffect(1.2)
-        .tint(Ink.surface)
+    TransparentWindowStatusPanel {
+      VStack(spacing: OmiSpacing.md) {
+        ProgressView()
+          .progressViewStyle(.circular)
+          .scaleEffect(1.2)
+          .tint(Ink.surface)
 
-      Text("Loading screenshots...")
-        .scaledFont(size: OmiType.body)
-        .foregroundColor(Ink.secondary)
+        Text("Loading screenshots...")
+          .scaledFont(size: OmiType.body)
+          .foregroundColor(Ink.secondary)
+      }
     }
   }
 
   private func errorView(_: String) -> some View {
-    VStack(spacing: OmiSpacing.lg) {
-      ZStack {
-        Circle()
-          .fill(Ink.errorRed.opacity(0.1))
-          .frame(width: 80, height: 80)
+    TransparentWindowStatusPanel {
+      VStack(spacing: OmiSpacing.lg) {
+        ZStack {
+          Circle()
+            .fill(Ink.errorRed.opacity(0.1))
+            .frame(width: 80, height: 80)
 
-        Image(systemName: "exclamationmark.triangle")
-          .scaledFont(size: 36)
-          .foregroundColor(Ink.errorRed)
-      }
-
-      Text("Failed to Load Screenshots")
-        .scaledFont(size: OmiType.heading, weight: .semibold)
-        .foregroundColor(Ink.primary)
-
-      Text("Try again. If this continues, restart Omi.")
-        .scaledFont(size: OmiType.body)
-        .foregroundColor(Ink.secondary)
-
-      Button {
-        Task { await viewModel.loadInitialData() }
-      } label: {
-        HStack(spacing: OmiSpacing.xs) {
-          Image(systemName: "arrow.clockwise")
-          Text("Retry")
+          Image(systemName: "exclamationmark.triangle")
+            .scaledFont(size: 36)
+            .foregroundColor(Ink.errorRed)
         }
-        .scaledFont(size: OmiType.body, weight: .medium)
-        .foregroundColor(PageGlass.primaryActionLabel)
-        .padding(.horizontal, OmiSpacing.xl)
-        .padding(.vertical, OmiSpacing.sm)
-        .background(Ink.primary)
-        .cornerRadius(OmiChrome.elementRadius)
+
+        Text("Failed to Load Screenshots")
+          .scaledFont(size: OmiType.heading, weight: .semibold)
+          .foregroundColor(Ink.primary)
+
+        Text("Try again. If this continues, restart Omi.")
+          .scaledFont(size: OmiType.body)
+          .foregroundColor(Ink.secondary)
+
+        Button {
+          Task { await viewModel.loadInitialData() }
+        } label: {
+          HStack(spacing: OmiSpacing.xs) {
+            Image(systemName: "arrow.clockwise")
+            Text("Retry")
+          }
+          .scaledFont(size: OmiType.body, weight: .medium)
+          .foregroundColor(PageGlass.primaryActionLabel)
+          .padding(.horizontal, OmiSpacing.xl)
+          .padding(.vertical, OmiSpacing.sm)
+          .background(Ink.primary)
+          .cornerRadius(OmiChrome.elementRadius)
+        }
+        .buttonStyle(.plain)
       }
-      .buttonStyle(.plain)
     }
   }
 
