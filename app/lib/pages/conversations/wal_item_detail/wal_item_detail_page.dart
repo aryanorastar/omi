@@ -147,7 +147,7 @@ class _WalItemDetailPageState extends State<WalItemDetailPage> {
       builder: (context, syncProvider, child) {
         final currentWal = syncProvider.getWalById(widget.wal.id) ?? widget.wal;
         final isTransferring = currentWal.isSyncing;
-        final transferProgress = syncProvider.walsSyncedProgress;
+        final transferProgress = currentWal.deviceDownloadFraction;
         final transferSpeedKBps = currentWal.syncSpeedKBps;
         final transferEtaSeconds = currentWal.syncEtaSeconds;
 
@@ -252,7 +252,7 @@ class _WalItemDetailPageState extends State<WalItemDetailPage> {
                         ClipRRect(
                           borderRadius: BorderRadius.circular(4),
                           child: LinearProgressIndicator(
-                            value: transferProgress > 0 ? transferProgress : null,
+                            value: transferProgress,
                             backgroundColor: Colors.grey.shade800,
                             color: OmiColors.accent,
                             minHeight: 6,
@@ -262,12 +262,14 @@ class _WalItemDetailPageState extends State<WalItemDetailPage> {
                         Row(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
-                            Text(
-                              '${(transferProgress * 100).toInt()}%',
-                              style: TextStyle(color: Colors.grey.shade400, fontSize: 14, fontWeight: FontWeight.w500),
-                            ),
+                            if (transferProgress != null)
+                              Text(
+                                '${(transferProgress * 100).toInt()}%',
+                                style:
+                                    TextStyle(color: Colors.grey.shade400, fontSize: 14, fontWeight: FontWeight.w500),
+                              ),
                             if (transferSpeedKBps != null && transferSpeedKBps > 0) ...[
-                              const SizedBox(width: 16),
+                              if (transferProgress != null) const SizedBox(width: 16),
                               Text(
                                 '${transferSpeedKBps.toStringAsFixed(1)} KB/s',
                                 style: TextStyle(color: Colors.grey.shade500, fontSize: 14),
