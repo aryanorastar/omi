@@ -109,6 +109,13 @@ void main() {
     expect(indicator().value, 0.38);
     expect(find.text('38%'), findsOneWidget);
     expect(find.text('50.0 KB/s'), findsOneWidget);
+
+    // The same progress row must remain readable with a short viewport.
+    tester.view.physicalSize = const Size(2400, 1500);
+    await tester.pump();
+    expect(tester.takeException(), isNull);
+    await tester.ensureVisible(find.text('38%'));
+    expect(find.text('38%').hitTestable(), findsOneWidget);
     await tester.pumpWidget(const SizedBox.shrink());
     sync.transferDone.complete();
   });

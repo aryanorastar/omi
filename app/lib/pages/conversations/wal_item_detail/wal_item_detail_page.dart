@@ -208,7 +208,7 @@ class _WalItemDetailPageState extends State<WalItemDetailPage> {
             // Center content - Transfer UI
             Expanded(
               child: Center(
-                child: Padding(
+                child: SingleChildScrollView(
                   padding: const EdgeInsets.symmetric(horizontal: 40),
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
